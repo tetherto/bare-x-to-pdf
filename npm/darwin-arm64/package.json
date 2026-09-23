@@ -1,0 +1,32 @@
+{
+  "name": "bare-x-to-pdf-darwin-arm64",
+  "version": "0.3.0",
+  "description": "The macOS ARM 64-bit prebuild of bare-x-to-pdf",
+  "exports": {
+    "./package": "./package.json",
+    ".": "./index.js"
+  },
+  "files": [
+    "index.js",
+    "prebuilds"
+  ],
+  "addon": true,
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tetherto/bare-x-to-pdf.git"
+  },
+  "bugs": {
+    "url": "https://github.com/tetherto/bare-x-to-pdf/issues"
+  },
+  "homepage": "https://github.com/tetherto/bare-x-to-pdf",
+  "publishConfig": {
+    "access": "public"
+  }
+}
