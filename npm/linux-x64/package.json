@@ -1,6 +1,6 @@
 {
   "name": "bare-x-to-pdf-linux-x64",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "The Linux x86 64-bit prebuild of bare-x-to-pdf",
   "exports": {
     "./package": "./package.json",
