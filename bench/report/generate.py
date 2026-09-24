@@ -321,13 +321,6 @@ ul.method li{{margin:6px 0}}
         row("Peak memory", "six files in one process", f"{mem_ours / 2**20:.0f} MB", f"{mem_ref / 2**20:.0f} MB", f"{mem_ref / mem_ours:.1f}× less", "a"),
         row("Input formats", "converted to PDF", "14 extensions", "221 import filters", "far broader coverage", "b"),
     ]
-    w(f"""
-<div class="tablewrap"><table class="vs">
-<thead><tr><th class="metric">Measure</th><th class="eng ours"><i></i>bare-x-to-pdf</th><th class="eng ref"><i></i>bare-collabora</th><th>Difference</th></tr></thead>
-<tbody>{''.join(rows)}</tbody>
-</table></div>
-<p class="note">Green marks the better value on each row. Layout fidelity against bare-collabora is at the end of this page.</p>
-""")
     # Text extraction
     prec_o, prec_r = mean_of("ours", "precision"), mean_of("reference", "precision")
     imperfect = [t for t in scored if min(t["ours"]["recall"], t["reference"]["recall"], t["ours"]["order"], t["reference"]["order"]) < 0.999]
@@ -358,6 +351,15 @@ ul.method li{{margin:6px 0}}
     w("""</tbody></table></div>
 <p class="note">A word counts as found when it appears in the PDF text exactly, after Unicode normalisation, case-folding and unifying hyphen variants. A label or number glued to a word, or a value printed in a different form, therefore counts as missing for both engines alike.</p>""")
 
+    w(f"""
+<h2>All measures</h2>
+<p>Every measure side by side, in the same order as the sections of this page.</p>
+<div class="tablewrap"><table class="vs">
+<thead><tr><th class="metric">Measure</th><th class="eng ours"><i></i>bare-x-to-pdf</th><th class="eng ref"><i></i>bare-collabora</th><th>Difference</th></tr></thead>
+<tbody>{''.join(rows)}</tbody>
+</table></div>
+<p class="note">Green marks the better value on each row. Layout fidelity against bare-collabora is at the end of this page.</p>
+""")
     # Size
     scale = max(ours_total, ref_total)
     w(f"""
