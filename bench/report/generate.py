@@ -200,6 +200,7 @@ body{{background:var(--bg);color:var(--text);font-family:"IBM Plex Sans",system-
 h1{{font-size:34px;font-weight:600;margin:0 0 8px;letter-spacing:-.015em;text-wrap:balance;line-height:1.2}}
 h2{{font-size:24px;font-weight:600;margin:64px 0 8px;letter-spacing:-.01em}}
 h2 + p{{margin-top:8px}}
+h3{{font-size:19px;font-weight:600;margin:36px 0 6px}}
 p{{max-width:78ch;color:var(--text-2);margin:12px 0}}
 p b, li b{{color:var(--text);font-weight:500}}
 .eyebrow{{font-size:13px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);font-weight:500}}
@@ -290,7 +291,7 @@ ul.method li{{margin:6px 0}}
 <div class="wrap">
 <div class="eyebrow">Benchmark report</div>
 <h1>bare-x-to-pdf against bare-collabora</h1>
-<p>Office documents converted to PDF by our Rust and Typst engine, compared page by page with the same files converted by bare-collabora (LibreOfficeKit). Same machine, same corpus, same rasteriser.</p>
+<p>Office documents converted to PDF by our Rust and Typst engine and by bare-collabora (LibreOfficeKit), on the same machine and the same corpus. The measures are ordered by how much they matter for how bare-x-to-pdf is used: how much of the text comes back out of the PDF, how big the library is, and how fast it converts. Examples follow, and layout fidelity, which matters least, comes last.</p>
 <div class="meta"><span>{today}</span><span>commit <code>{commit}</code></span><span>{esc(cpu)}, {mem_gb} GB, macOS {esc(macos)}, Bare {esc(bare.lstrip('v'))}</span><span>bare-collabora {esc(collabora_version)}</span><span>{len(cases)} cases, {pages} pages</span></div>
 """)
 
@@ -310,7 +311,6 @@ ul.method li{{margin:6px 0}}
         return f"{b / a:.1f}× " if a else ""
 
     rows = [
-        row("Layout fidelity", f"mean ink overlap with bare-collabora pages, {len(cases)} cases", pct(mean_iou), "reference", "measured against it", None),
         row("Words recovered from the PDF", f"share of source words the PDF text contains, {len(scored)} cases", pct(recall_o), pct(recall_r), f"{(recall_o - recall_r) * 100:+.1f} points", "a" if recall_o > recall_r else "b"),
         row("Reading order", "longest run of source words in the same order", pct(order_o), pct(order_r), f"{(order_o - order_r) * 100:+.1f} points", "a" if order_o > order_r else "b"),
         row("Install size", "darwin-arm64 prebuild on disk", mb(ours_total), mb(ref_total), f"{ref_total / ours_total:.1f}× smaller", "a"),
@@ -326,39 +326,8 @@ ul.method li{{margin:6px 0}}
 <thead><tr><th class="metric">Measure</th><th class="eng ours"><i></i>bare-x-to-pdf</th><th class="eng ref"><i></i>bare-collabora</th><th>Difference</th></tr></thead>
 <tbody>{''.join(rows)}</tbody>
 </table></div>
-<p class="note">Green marks the better value on each row. Layout fidelity is measured against bare-collabora's own output, so that column is the reference by definition.</p>
-
-<h2>How the score works</h2>
-<p>Each page from both engines is rasterised at 72 dpi. <b>Ink overlap</b> (IoU) takes the dark pixels of the reference page and of ours and divides what they share by everything either of them painted. It is a harsh, layout-first score: text stems are about one pixel wide at this size, so a line shifted by half a point loses most of its overlap even though a reader would never notice. As a rule of thumb, <b>85% and above</b> is indistinguishable at reading size, <b>60 to 85%</b> is the same layout with glyphs a fraction of a point off, and <b>below 60%</b> something sits in a different place.</p>
-<div class="key"><span><i style="background:var(--good)"></i>85% and above</span><span><i style="background:var(--fair)"></i>60 to 85%</span><span><i style="background:var(--weak)"></i>below 60%</span></div>
-
-<h2>Fidelity by format</h2>
-<p>Mean ink overlap per input format. Word and OpenDocument text lead because most layout rules were validated against Writer's source; spreadsheets and slides carry more small text and shapes, where half-point offsets cost more.</p>
-<div class="fmts">""")
-    for fmt in FORMAT_ORDER:
-        rs = by_format.get(fmt)
-        if not rs:
-            continue
-        m = statistics.mean(r["inkIou"] for r in rs)
-        w(f'<div class="fmt"><div class="fmt-head"><span class="fmt-name">{esc(FORMAT_NAMES[fmt])}</span><span class="fmt-n">{len(rs)} case{"s" if len(rs) != 1 else ""}</span><span class="fmt-val">{pct(m)}</span></div><div class="bar"><div class="bar-fill {grade(m)}" style="width:{m * 100:.1f}%"></div></div></div>')
-    w("</div>")
-
-    # Every case
-    w(f"""
-<h2>Every case</h2>
-<p>One row per document, best match first. Times are the in-process conversion of each file during the run, with both engines warm. Filter by format, or click a column header to sort.</p>
-<div class="chips" id="case-chips"><button class="chip" data-fmt="all" aria-pressed="true">All formats</button>""")
-    for fmt in FORMAT_ORDER:
-        if fmt in by_format:
-            w(f'<button class="chip" data-fmt="{fmt}" aria-pressed="false">{esc(FORMAT_NAMES[fmt])}</button>')
-    w("""</div>
-<div class="tablewrap" id="cases"><table><thead><tr><th data-k="name">Document</th><th data-k="fmt">Format</th><th class="num" data-k="pages">Pages</th><th data-k="iou">Ink overlap</th><th class="num" data-k="ours">bare-x-to-pdf</th><th class="num" data-k="ref">bare-collabora</th></tr></thead><tbody>""")
-    for r in cases:
-        fmt = r["name"].rsplit(".", 1)[1]
-        g = grade(r["inkIou"])
-        w(f'<tr data-fmt="{fmt}"><td class="name">{esc(r["name"])}</td><td class="fmt">{esc(FORMAT_NAMES[fmt])}</td><td class="num">{r["referencePages"]}</td><td class="iou"><div class="cell"><div class="bar sm"><div class="bar-fill {g}" style="width:{r["inkIou"] * 100:.1f}%"></div></div><span class="num">{pct(r["inkIou"])}</span></div></td><td class="num">{ms(r["oursMs"])}</td><td class="num">{ms(r["referenceMs"])}</td></tr>')
-    w("</tbody></table></div>")
-
+<p class="note">Green marks the better value on each row. Layout fidelity against bare-collabora is at the end of this page.</p>
+""")
     # Text extraction
     prec_o, prec_r = mean_of("ours", "precision"), mean_of("reference", "precision")
     imperfect = [t for t in scored if min(t["ours"]["recall"], t["reference"]["recall"], t["ours"]["order"], t["reference"]["order"]) < 0.999]
@@ -389,16 +358,6 @@ ul.method li{{margin:6px 0}}
     w("""</tbody></table></div>
 <p class="note">A word counts as found when it appears in the PDF text exactly, after Unicode normalisation, case-folding and unifying hyphen variants. A label or number glued to a word, or a value printed in a different form, therefore counts as missing for both engines alike.</p>""")
 
-    # Speed
-    max_ms = max(max(warm(ours_t, f), warm(ref_t, f)) for f in TIMING_FILES)
-    w(f"""
-<h2>Conversion time</h2>
-<p>Each engine ran in its own process on six files, six conversions per file; the bars show the median of the last five. bare-collabora's first document also pays for LibreOfficeKit start-up ({ms(first_ref)} for sdk-sample.docx against {ms(first_ours)} for ours), and requiring the module takes {ms(ref_t["loadMs"])} against {ms(ours_t["loadMs"])}. Peak resident memory for the whole run was <b>{mem_ours / 2**20:.0f} MB</b> against <b>{mem_ref / 2**20:.0f} MB</b>.</p>
-<div class="key"><span><i style="background:var(--ours)"></i>bare-x-to-pdf</span><span><i style="background:var(--ref)"></i>bare-collabora</span></div>""")
-    for f in TIMING_FILES:
-        a, b = warm(ours_t, f), warm(ref_t, f)
-        w(f'<div class="grp"><div class="grp-label">{esc(f)}</div><div class="grp-bars"><div class="hbar"><div class="hbar-fill ours" style="width:{a / max_ms * 100:.1f}%"></div><span class="hbar-val">{ms(a)}</span></div><div class="hbar"><div class="hbar-fill ref" style="width:{b / max_ms * 100:.1f}%"></div><span class="hbar-val">{ms(b)}</span></div></div></div>')
-
     # Size
     scale = max(ours_total, ref_total)
     w(f"""
@@ -413,10 +372,20 @@ ul.method li{{margin:6px 0}}
         w(f'<span><i class="sw ref s{i}"></i>{esc(name)} <b>{mb(size)}</b></span>')
     w("</div></div>")
 
+    # Speed
+    max_ms = max(max(warm(ours_t, f), warm(ref_t, f)) for f in TIMING_FILES)
+    w(f"""
+<h2>Conversion time</h2>
+<p>Each engine ran in its own process on six files, six conversions per file; the bars show the median of the last five. bare-collabora's first document also pays for LibreOfficeKit start-up ({ms(first_ref)} for sdk-sample.docx against {ms(first_ours)} for ours), and requiring the module takes {ms(ref_t["loadMs"])} against {ms(ours_t["loadMs"])}. Peak resident memory for the whole run was <b>{mem_ours / 2**20:.0f} MB</b> against <b>{mem_ref / 2**20:.0f} MB</b>.</p>
+<div class="key"><span><i style="background:var(--ours)"></i>bare-x-to-pdf</span><span><i style="background:var(--ref)"></i>bare-collabora</span></div>""")
+    for f in TIMING_FILES:
+        a, b = warm(ours_t, f), warm(ref_t, f)
+        w(f'<div class="grp"><div class="grp-label">{esc(f)}</div><div class="grp-bars"><div class="hbar"><div class="hbar-fill ours" style="width:{a / max_ms * 100:.1f}%"></div><span class="hbar-val">{ms(a)}</span></div><div class="hbar"><div class="hbar-fill ref" style="width:{b / max_ms * 100:.1f}%"></div><span class="hbar-val">{ms(b)}</span></div></div></div>')
+
     # Side by side
-    w("""
+    w(f"""
 <h2>Side by side</h2>
-<p>First page of {len(SAMPLES)} cases across the range. The overlay paints the reference in blue and ours in red; where they agree the ink is dark.</p>""")
+<p>First page of {len(SAMPLES)} cases across the range, from bare-collabora and from bare-x-to-pdf. The overlay paints bare-collabora's ink in blue and ours in red; where they agree the ink is dark. The ink overlap score on each example is explained under Layout fidelity below.</p>""")
     by_name = {r["name"]: r for r in cases}
     sample_formats = [f for f in FORMAT_ORDER if any(n.rsplit(".", 1)[-1] == f for n, _ in SAMPLES)]
     w('<div class="chips" id="sample-chips"><button class="chip" data-fmt="all" aria-pressed="true">All formats</button>')
@@ -436,14 +405,48 @@ ul.method li{{margin:6px 0}}
         w(f'<figure class="sample" data-fmt="{name.rsplit(".", 1)[-1]}"><figcaption><span class="sample-name">{esc(name)}</span><span class="sample-fmt">{esc(FORMAT_NAMES[name.rsplit(".", 1)[-1]])}</span><span class="pill {g}">{pct(r["inkIou"])} ink overlap</span></figcaption><div class="triple"><div><img src="{data_uri(imgs[0])}" alt="bare-collabora page 1 of {esc(name)}"><span>bare-collabora</span></div><div><img src="{data_uri(imgs[1])}" alt="bare-x-to-pdf page 1 of {esc(name)}"><span>bare-x-to-pdf</span></div><div><img src="{data_uri(imgs[2])}" alt="overlay of both pages"><span>overlay: blue reference only, red ours only</span></div></div><p class="note">{esc(note)}</p></figure>')
     w("</div>")
 
+    w(f"""
+<h2>Layout fidelity</h2>
+<p><b>For how bare-x-to-pdf is used, visual fidelity matters much less than the sections above.</b> Its PDFs are read for their text, so what counts most is that every word comes out, in order, from a small and fast library. Text extraction, size and speed are the measures to judge it by. Fidelity is tracked here to catch layout regressions, not as a goal of matching LibreOffice pixel for pixel. Across all {len(cases)} cases, the mean ink overlap with bare-collabora's pages is <b>{pct(mean_iou)}</b>.</p>
+<h3>How the score works</h3>
+<p>Each page from both engines is rasterised at 72 dpi. <b>Ink overlap</b> (IoU) takes the dark pixels of the reference page and of ours and divides what they share by everything either of them painted. It is a harsh, layout-first score: text stems are about one pixel wide at this size, so a line shifted by half a point loses most of its overlap even though a reader would never notice. As a rule of thumb, <b>85% and above</b> is indistinguishable at reading size, <b>60 to 85%</b> is the same layout with glyphs a fraction of a point off, and <b>below 60%</b> something sits in a different place.</p>
+<div class="key"><span><i style="background:var(--good)"></i>85% and above</span><span><i style="background:var(--fair)"></i>60 to 85%</span><span><i style="background:var(--weak)"></i>below 60%</span></div>
+
+<h3>Fidelity by format</h3>
+<p>Mean ink overlap per input format. Word and OpenDocument text lead because most layout rules were validated against Writer's source; spreadsheets and slides carry more small text and shapes, where half-point offsets cost more.</p>
+<div class="fmts">""")
+    for fmt in FORMAT_ORDER:
+        rs = by_format.get(fmt)
+        if not rs:
+            continue
+        m = statistics.mean(r["inkIou"] for r in rs)
+        w(f'<div class="fmt"><div class="fmt-head"><span class="fmt-name">{esc(FORMAT_NAMES[fmt])}</span><span class="fmt-n">{len(rs)} case{"s" if len(rs) != 1 else ""}</span><span class="fmt-val">{pct(m)}</span></div><div class="bar"><div class="bar-fill {grade(m)}" style="width:{m * 100:.1f}%"></div></div></div>')
+    w("</div>")
+
+    # Every case
+    w(f"""
+<h3>Every case</h3>
+<p>One row per document, best match first. Times are the in-process conversion of each file during the run, with both engines warm. Filter by format, or click a column header to sort.</p>
+<div class="chips" id="case-chips"><button class="chip" data-fmt="all" aria-pressed="true">All formats</button>""")
+    for fmt in FORMAT_ORDER:
+        if fmt in by_format:
+            w(f'<button class="chip" data-fmt="{fmt}" aria-pressed="false">{esc(FORMAT_NAMES[fmt])}</button>')
+    w("""</div>
+<div class="tablewrap" id="cases"><table><thead><tr><th data-k="name">Document</th><th data-k="fmt">Format</th><th class="num" data-k="pages">Pages</th><th data-k="iou">Ink overlap</th><th class="num" data-k="ours">bare-x-to-pdf</th><th class="num" data-k="ref">bare-collabora</th></tr></thead><tbody>""")
+    for r in cases:
+        fmt = r["name"].rsplit(".", 1)[1]
+        g = grade(r["inkIou"])
+        w(f'<tr data-fmt="{fmt}"><td class="name">{esc(r["name"])}</td><td class="fmt">{esc(FORMAT_NAMES[fmt])}</td><td class="num">{r["referencePages"]}</td><td class="iou"><div class="cell"><div class="bar sm"><div class="bar-fill {g}" style="width:{r["inkIou"] * 100:.1f}%"></div></div><span class="num">{pct(r["inkIou"])}</span></div></td><td class="num">{ms(r["oursMs"])}</td><td class="num">{ms(r["referenceMs"])}</td></tr>')
+    w("</tbody></table></div>")
+
     # Method
     w(f"""
 <h2>Method</h2>
 <ul class="method">
 <li>Corpus: {len(cases)} documents in <code>bench/corpus/</code>: real samples, a chart workbook, plus feature fixtures from LibreOffice's test suites (numbering, headers and footers, anchored pictures, footnotes, section breaks, borders, frames, columns, number formats).</li>
-<li>Reference: bare-collabora {esc(collabora_version)} (darwin-arm64) converting the same files in the same process as the benchmark harness, <code>bare bench/run.js</code>.</li>
-<li>Rasterisation: bare-pdfium at 72 dpi for both PDFs; ink overlap and pixel similarity in <code>bench/lib/compare.js</code>.</li>
-<li>Text: <code>bare bench/text.js</code> extracts both PDFs with bare-pdfium and reads the source words from the document XML with a small zip reader in <code>bench/lib/source-text.js</code>; metrics in <code>bench/lib/text-metrics.js</code>.</li>
+<li>Reference: bare-collabora {esc(collabora_version)} (darwin-arm64) converting the same files in the same process as the benchmark harness, <code>npm run ink</code> in <code>bench/</code>.</li>
+<li>Rasterisation: bare-pdfium 1.3.0 at 72 dpi for both PDFs; ink overlap and pixel similarity in <code>bench/lib/compare.js</code>.</li>
+<li>Text: <code>npm run text</code> in <code>bench/</code> extracts both PDFs with bare-pdfium 1.3.0 and reads the source words from the document XML with a small zip reader in <code>bench/lib/source-text.js</code>; metrics in <code>bench/lib/text-metrics.js</code>.</li>
 <li>Timing: <code>bare scripts/timing.js ours|collabora &lt;files&gt;</code> in separate processes; peak memory from <code>/usr/bin/time -l</code>.</li>
 <li>Sizes: the darwin-arm64 prebuild directories on disk.</li>
 <li>This page: <code>python3 bench/report/generate.py</code> over <code>bench/out</code>.</li>
