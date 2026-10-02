@@ -1,6 +1,6 @@
 {
   "name": "bare-x-to-pdf-ios-arm64-simulator",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "The iOS ARM simulator 64-bit prebuild of bare-x-to-pdf",
   "exports": {
     "./package": "./package.json",
