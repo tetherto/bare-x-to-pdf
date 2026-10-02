@@ -6,3 +6,4 @@ bench/out
 .DS_Store
 npm/*/prebuilds
 package-lock.json
+coverage
