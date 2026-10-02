@@ -1,6 +1,6 @@
 const fs = require('bare-fs')
 const path = require('bare-path')
-const { convert } = require('..')
+const { convertSync } = require('..')
 
 const [input, output] = Bare.argv.slice(2)
 if (!input || !output) {
@@ -10,4 +10,4 @@ if (!input || !output) {
 
 const to = path.extname(output).slice(1)
 const from = path.extname(input).slice(1) || undefined
-fs.writeFileSync(output, convert(fs.readFileSync(input), { from, to }))
+fs.writeFileSync(output, convertSync(fs.readFileSync(input), { from, to }))

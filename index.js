@@ -88,7 +88,7 @@ function detectCompound(bytes) {
   return null
 }
 
-function convert(input, opts = {}) {
+function prepare(input, opts) {
   const bytes = toBytes(input)
   const to = normalize(opts.to)
   if (!to) throw new TypeError('convert: opts.to is required')
@@ -100,8 +100,15 @@ function convert(input, opts = {}) {
     throw new Error(`convert: ${from} to ${to} is not supported`)
   }
 
-  const fontsDir = opts.fontsDir || FONTS_DIR
-  return Buffer.from(binding.convert(bytes, from, to, fontsDir))
+  return [bytes, from, to, opts.fontsDir || FONTS_DIR]
+}
+
+async function convert(input, opts = {}) {
+  return Buffer.from(await binding.convert(...prepare(input, opts)))
+}
+
+function convertSync(input, opts = {}) {
+  return Buffer.from(binding.convertSync(...prepare(input, opts)))
 }
 
 function supports(from, to) {
@@ -125,6 +132,7 @@ function toBytes(input) {
 }
 
 exports.convert = convert
+exports.convertSync = convertSync
 exports.detect = detect
 exports.supports = supports
 exports.conversions = conversions

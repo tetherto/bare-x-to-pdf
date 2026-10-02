@@ -55,7 +55,7 @@ function runToPdf(file, from) {
   try {
     let ours
     result.oursMs = time(() => {
-      ours = converter.convert(bytes, { from, to: 'pdf' })
+      ours = converter.convertSync(bytes, { from, to: 'pdf' })
     })
     fs.writeFileSync(path.join(dir, 'ours.pdf'), ours)
     Object.assign(result, score(fs.readFileSync(referencePdf), ours, dir, 'ours'))

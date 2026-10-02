@@ -13,10 +13,10 @@ const rounds = 6
 const t0 = Date.now()
 let run
 if (engine === 'ours') {
-  const { convert } = require('..')
+  const { convertSync } = require('..')
   run = (file) => {
     const bytes = fs.readFileSync(file)
-    return () => fs.writeFileSync(tmp, convert(bytes, { to: 'pdf' }))
+    return () => fs.writeFileSync(tmp, convertSync(bytes, { to: 'pdf' }))
   }
 } else {
   const { Document } = require(path.resolve(reference))

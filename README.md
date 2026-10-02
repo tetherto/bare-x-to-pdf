@@ -47,23 +47,31 @@ npm install --os=ios --cpu=arm64
 ```js
 const converter = require('bare-x-to-pdf')
 
-const pdf = converter.convert(docxBytes, { to: 'pdf' })
+const pdf = await converter.convert(docxBytes, { to: 'pdf' })
 ```
 
-Input is a `Uint8Array` or `ArrayBuffer` and the result is a `Buffer`. Calls are
-synchronous and CPU bound; run them in a `Bare.Thread` when latency matters.
+Input is a `Uint8Array` or `ArrayBuffer` and the result is a `Buffer`. `convert()` runs on
+the libuv thread pool and does not block the JavaScript thread; `convertSync()` runs on the
+calling thread.
 
 ## API
 
-### `convert(input, options)`
+### `const pdf = await convert(input, options)`
 
-Convert `input` and return a `Buffer`.
+Convert `input` off the JavaScript thread and resolve with a `Buffer`. The input is copied,
+so it may be changed or transferred once the call returns. Invalid options and conversion
+errors reject the promise.
 
 - `options.to` — target format, `'pdf'`. Required.
 - `options.from` — source format; sniffed from the bytes when omitted. Markdown has no
   signature to sniff, so pass `from: 'md'` for it. Markdown images load only from `data:`
   URIs, since the input is bytes with no directory to resolve relative paths against.
 - `options.fontsDir` — a directory of fonts to use instead of the bundled set.
+
+### `const pdf = convertSync(input, options)`
+
+Convert `input` on the calling thread and return a `Buffer`. Takes the same options as
+`convert()`.
 
 ### `detect(input)`
 

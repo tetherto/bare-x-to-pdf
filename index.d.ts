@@ -30,7 +30,9 @@ export interface ConvertOptions {
   fontsDir?: string
 }
 
-export function convert(input: Uint8Array | ArrayBuffer, opts: ConvertOptions): Buffer
+export function convert(input: Uint8Array | ArrayBuffer, opts: ConvertOptions): Promise<Buffer>
+
+export function convertSync(input: Uint8Array | ArrayBuffer, opts: ConvertOptions): Buffer
 
 export function detect(input: Uint8Array | ArrayBuffer): Format | null
 
