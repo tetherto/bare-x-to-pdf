@@ -7,7 +7,7 @@ use crate::model::*;
 use crate::odt::styles::{length, Styles as OdfStyles};
 use crate::xml::{self, Element, Node};
 use std::collections::{BTreeMap, HashMap};
-use std::io::{Cursor, Read};
+use std::io::Cursor;
 
 const CM: f64 = 72.0 / 2.54;
 const DEFAULT_COLUMN: f64 = 0.889 * 72.0;
@@ -31,8 +31,7 @@ fn package(bytes: &[u8]) -> Result<Package, Error> {
     let mut read = |name: &str| -> Result<Option<Vec<u8>>, Error> {
         match archive.by_name(name) {
             Ok(mut file) => {
-                let mut data = Vec::new();
-                file.read_to_end(&mut data).map_err(|e| Error::new(format!("reading {name}: {e}")))?;
+                let data = crate::limits::read_entry(&mut file).map_err(|e| Error::new(format!("reading {name}: {e}")))?;
                 Ok(Some(data))
             }
             Err(_) => Ok(None),
@@ -45,8 +44,7 @@ fn package(bytes: &[u8]) -> Result<Package, Error> {
     for name in names {
         if name.starts_with("Pictures/") || name.starts_with("Object ") || name.starts_with("ObjectReplacements/") {
             if let Ok(mut file) = archive.by_name(&name) {
-                let mut data = Vec::new();
-                if file.read_to_end(&mut data).is_ok() {
+                if let Ok(data) = crate::limits::read_entry(&mut file) {
                     files.insert(name, data);
                 }
             }
@@ -74,12 +72,12 @@ pub fn read(bytes: &[u8]) -> Result<Document, Error> {
             continue;
         }
         let name = table.attr("name").unwrap_or("Sheet").to_string();
-        let mut sheet = read_table(table, &odf, &mut formats, &pkg, &name);
+        let mut sheet = read_table(table, &odf, &mut formats, &pkg, &name)?;
         conditional_formats(table, spreadsheet, &name, &mut sheet, &mut formats);
         auto_row_heights(&mut sheet, &formats.styles);
         parsed.push((name, sheet));
     }
-    Ok(workbook_document(workbook_defaults(), &parsed, &formats.styles))
+    workbook_document(workbook_defaults(), &parsed, &formats.styles)
 }
 
 struct Formats<'a> {
@@ -249,7 +247,7 @@ fn inline_runs(el: &Element, odf: &OdfStyles, props: &RunProps, base_size: f64, 
             Node::Text(t) => out.push((t.clone(), props.clone())),
             Node::Element(child) => match child.name.as_str() {
                 "s" => {
-                    let count = child.attr("c").and_then(|c| c.parse::<usize>().ok()).unwrap_or(1);
+                    let count = child.attr("c").and_then(|c| c.parse::<usize>().ok()).unwrap_or(1).min(crate::limits::MAX_REPEATED_SPACES);
                     out.push((" ".repeat(count), props.clone()));
                 }
                 "tab" => out.push(("\t".into(), props.clone())),
@@ -292,7 +290,7 @@ fn cell_value(cell: &Element, runs: Vec<(String, RunProps)>) -> CellValue {
     }
 }
 
-fn read_table(table: &Element, odf: &OdfStyles, formats: &mut Formats, pkg: &Package, sheet_name: &str) -> Sheet {
+fn read_table(table: &Element, odf: &OdfStyles, formats: &mut Formats, pkg: &Package, sheet_name: &str) -> Result<Sheet, Error> {
     let mut col_specs: Vec<(u32, u32, f64, bool)> = Vec::new();
     let mut column_styles: Vec<(u32, u32, String)> = Vec::new();
     let mut col = 1u32;
@@ -320,6 +318,7 @@ fn read_table(table: &Element, odf: &OdfStyles, formats: &mut Formats, pkg: &Pac
     let mut notes = BTreeMap::new();
     let mut drawings_src: Vec<(u32, u32, &Element)> = Vec::new();
     let (mut max_row, mut max_col) = (0u32, 0u32);
+    let mut materialised = 0u64;
     let mut row = 1u32;
     let mut row_elements = Vec::new();
     rows(table, &mut row_elements);
@@ -388,6 +387,10 @@ fn read_table(table: &Element, odf: &OdfStyles, formats: &mut Formats, pkg: &Pac
             template.height = (tallest > 0.0).then(|| (tallest + 1.15).max(DEFAULT_ROW));
         }
         let repeats = if has_content || !template.cells.is_empty() { count.min(4096) } else { count };
+        materialised += template.cells.len() as u64 * u64::from(repeats);
+        if materialised > crate::limits::MAX_SHEET_CELLS {
+            return Err(Error::new(format!("the spreadsheet is too large to convert: more than {} cells", crate::limits::MAX_SHEET_CELLS)));
+        }
         if !template.cells.is_empty() || height.is_some() || hidden {
             for k in 0..repeats.min(if template.cells.is_empty() { 1 } else { repeats }) {
                 sheet_rows.insert(row + k, template.clone());
@@ -475,7 +478,7 @@ fn read_table(table: &Element, odf: &OdfStyles, formats: &mut Formats, pkg: &Pac
     let specs_pt: Vec<(u32, u32, f64, bool)> = col_specs.iter().map(|&(a, b, w, h)| (a, b, w, h)).collect();
     let extent = sheet_extent(&formats.styles, &sheet_rows, &specs_pt, DEFAULT_COLUMN, 1.0, max_row, max_col, print_area);
     let page = page_options(table, odf, formats, sheet_name);
-    Sheet {
+    Ok(Sheet {
         notes,
         conditional: Vec::new(),
         drawings,
@@ -490,7 +493,7 @@ fn read_table(table: &Element, odf: &OdfStyles, formats: &mut Formats, pkg: &Pac
         last_col: extent.last_col,
         row_breaks: Vec::new(),
         col_breaks: Vec::new(),
-    }
+    })
 }
 
 fn line_height(font: &RunProps) -> f64 {
@@ -562,7 +565,7 @@ fn field_text(el: &Element, out: &mut String) {
                 "sheet-name" => out.push_str("&A"),
                 "page-number" => out.push_str("&P"),
                 "page-count" => out.push_str("&N"),
-                "s" => out.push_str(&" ".repeat(child.attr("c").and_then(|c| c.parse().ok()).unwrap_or(1))),
+                "s" => out.push_str(&" ".repeat(child.attr("c").and_then(|c| c.parse::<usize>().ok()).unwrap_or(1).min(crate::limits::MAX_REPEATED_SPACES))),
                 "tab" => out.push(' '),
                 _ => field_text(child, out),
             },

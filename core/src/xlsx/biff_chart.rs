@@ -258,16 +258,25 @@ pub fn parse(records: &[(u16, &[u8])]) -> Option<ChartSource> {
     chart.kind.is_some().then_some(chart)
 }
 
+pub const MAX_SERIES_POINTS: usize = 32_000;
+const MAX_SERIES: usize = 255;
+const MAX_CHART_POINTS: usize = 256_000;
+
 pub fn resolve(source: &ChartSource, cells: &dyn Fn(&Area) -> Vec<Cell>, fills: &[Color], lines: &[Color], font: Option<String>) -> Chart {
     let kind = source.kind.clone().unwrap_or(ChartKind::Column);
     let mut categories: Vec<String> = Vec::new();
     let mut series = Vec::new();
-    for (i, s) in source.series.iter().enumerate() {
+    let mut points = 0usize;
+    for (i, s) in source.series.iter().enumerate().take(MAX_SERIES) {
         let values: Vec<Option<f64>> = s
             .values
             .as_ref()
             .map(|a| cells(a).into_iter().map(|c| if let Cell::Number(v, _) = c { Some(v) } else { None }).collect())
             .unwrap_or_default();
+        points += values.len();
+        if points > MAX_CHART_POINTS {
+            break;
+        }
         if categories.is_empty() {
             if let Some(a) = &s.categories {
                 categories = cells(a)

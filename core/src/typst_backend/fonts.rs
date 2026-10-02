@@ -46,7 +46,7 @@ impl FontSet {
 
         let mut fonts = Vec::new();
         for path in paths {
-            let data = std::fs::read(&path)?;
+            let Ok(data) = std::fs::read(&path) else { continue };
             fonts.extend(Font::iter(Bytes::new(data)));
         }
         if fonts.is_empty() {

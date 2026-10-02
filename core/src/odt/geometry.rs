@@ -8,6 +8,7 @@ struct Context<'a> {
     vars: HashMap<&'static str, f64>,
     cache: std::cell::RefCell<HashMap<String, f64>>,
     depth: std::cell::Cell<usize>,
+    nesting: std::cell::Cell<usize>,
 }
 
 impl Context<'_> {
@@ -89,7 +90,22 @@ impl Parser<'_, '_> {
         self.tokens.get(self.pos)
     }
 
+    fn nested(&mut self, parse: impl FnOnce(&mut Self) -> f64) -> f64 {
+        let nesting = &self.ctx.nesting;
+        if nesting.get() >= crate::limits::MAX_FORMULA_DEPTH {
+            return 0.0;
+        }
+        nesting.set(nesting.get() + 1);
+        let value = parse(self);
+        self.ctx.nesting.set(self.ctx.nesting.get() - 1);
+        value
+    }
+
     fn expr(&mut self) -> f64 {
+        self.nested(Self::expr_inner)
+    }
+
+    fn expr_inner(&mut self) -> f64 {
         let mut value = self.term();
         while let Some(Token::Op(op @ ('+' | '-'))) = self.peek().cloned() {
             self.pos += 1;
@@ -110,6 +126,10 @@ impl Parser<'_, '_> {
     }
 
     fn unary(&mut self) -> f64 {
+        self.nested(Self::unary_inner)
+    }
+
+    fn unary_inner(&mut self) -> f64 {
         if let Some(Token::Op('-')) = self.peek() {
             self.pos += 1;
             return -self.unary();
@@ -228,6 +248,7 @@ pub fn enhanced_path(geometry: &Element, width_pt: f64, height_pt: f64) -> Optio
         vars,
         cache: std::cell::RefCell::new(HashMap::new()),
         depth: std::cell::Cell::new(0),
+        nesting: std::cell::Cell::new(0),
     };
     let norm = |x: f64, y: f64| ((x - origin.0) / space_w, (y - origin.1) / space_h);
     let tokens: Vec<&str> = path.split_whitespace().collect();

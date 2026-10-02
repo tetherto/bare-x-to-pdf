@@ -159,11 +159,17 @@ fn dib_to_png(dib: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
     let (w, h) = (width as usize, height.unsigned_abs() as usize);
+    if (w as u64) * (h as u64) > crate::limits::MAX_IMAGE_PIXELS {
+        return None;
+    }
     let used = u32_at(32).unwrap_or(0) as usize;
-    let colors = if bits <= 8 { if used > 0 { used } else { 1 << bits } } else { 0 };
-    let palette = dib.get(header..header + colors * 4)?;
+    let colors = if bits <= 8 { if used > 0 { used.min(256) } else { 1 << bits } } else { 0 };
+    let palette = dib.get(header..header.checked_add(colors * 4)?)?;
     let pixels = dib.get(header + colors * 4..)?;
     let stride = (w * bits as usize).div_ceil(32) * 4;
+    if pixels.len() < stride.checked_mul(h)? {
+        return None;
+    }
     let mut rgba = Vec::with_capacity(w * h * 4);
     for y in 0..h {
         let source = if height > 0 { h - 1 - y } else { y };

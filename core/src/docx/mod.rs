@@ -193,7 +193,7 @@ fn build_section<R: Read + std::io::Seek>(
         ..Section::default()
     };
     if let Some(cols) = sect.child("cols") {
-        section.columns = cols.attr("num").and_then(|n| n.parse().ok()).unwrap_or(1).max(1);
+        section.columns = cols.attr("num").and_then(|n| n.parse().ok()).unwrap_or(1).clamp(1, crate::limits::MAX_TEXT_COLUMNS);
         if let Some(space) = cols.attr("space").and_then(twips) {
             section.column_gap = space;
         }
@@ -267,8 +267,7 @@ fn entry<R: Read + std::io::Seek>(
 ) -> Result<Option<Vec<u8>>, Error> {
     match archive.by_name(name) {
         Ok(mut file) => {
-            let mut data = Vec::new();
-            file.read_to_end(&mut data)?;
+            let data = crate::limits::read_entry(&mut file)?;
             Ok(Some(data))
         }
         Err(zip::result::ZipError::FileNotFound) => Ok(None),
@@ -810,8 +809,7 @@ impl Reader<'_> {
                         .child("gridSpan")
                         .and_then(|s| s.attr("val"))
                         .and_then(|v| v.parse().ok())
-                        .unwrap_or(1)
-                        .max(1);
+                        .map_or(1, crate::limits::span);
                     cell.width = pr
                         .child("tcW")
                         .filter(|w| w.attr("type") != Some("pct"))

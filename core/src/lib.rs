@@ -1,6 +1,7 @@
 pub mod doc;
 pub mod docx;
 pub mod error;
+pub mod limits;
 pub mod markdown;
 pub mod model;
 pub mod odf_chart;
@@ -34,39 +35,39 @@ pub fn convert(input: &[u8], from: &str, to: &str, options: &Options) -> Result<
     match (from, to) {
         ("docx" | "docm" | "dotx" | "dotm", "pdf") => {
             let document = docx::read(input)?;
-            typst_backend::render_pdf(&document, options.fonts_dir)
+            typst_backend::render_pdf(document, options.fonts_dir)
         }
         ("doc" | "dot", "pdf") => {
             let document = doc::read(input)?;
-            typst_backend::render_pdf(&document, options.fonts_dir)
+            typst_backend::render_pdf(document, options.fonts_dir)
         }
         ("odt" | "ott" | "fodt", "pdf") => {
             let document = odt::read(input)?;
-            typst_backend::render_pdf(&document, options.fonts_dir)
+            typst_backend::render_pdf(document, options.fonts_dir)
         }
         ("xlsx" | "xlsm" | "xltx" | "xltm", "pdf") => {
             let document = xlsx::read(input)?;
-            typst_backend::render_pdf(&document, options.fonts_dir)
+            typst_backend::render_pdf(document, options.fonts_dir)
         }
         ("odp" | "otp" | "fodp", "pdf") => {
             let document = odt::read_odp(input)?;
-            typst_backend::render_pdf(&document, options.fonts_dir)
+            typst_backend::render_pdf(document, options.fonts_dir)
         }
         ("ods" | "ots" | "fods", "pdf") => {
             let document = xlsx::read_ods(input)?;
-            typst_backend::render_pdf(&document, options.fonts_dir)
+            typst_backend::render_pdf(document, options.fonts_dir)
         }
         ("xls" | "xlt", "pdf") => {
             let document = xlsx::read_xls(input)?;
-            typst_backend::render_pdf(&document, options.fonts_dir)
+            typst_backend::render_pdf(document, options.fonts_dir)
         }
         ("md" | "markdown", "pdf") => {
             let document = markdown::read(input)?;
-            typst_backend::render_pdf(&document, options.fonts_dir)
+            typst_backend::render_pdf(document, options.fonts_dir)
         }
         ("pptx", "pdf") => {
             let document = pptx::read(input)?;
-            typst_backend::render_pdf(&document, options.fonts_dir)
+            typst_backend::render_pdf(document, options.fonts_dir)
         }
         _ => Err(Error::new(format!("conversion from {from} to {to} is not supported"))),
     }
@@ -130,6 +131,9 @@ pub unsafe extern "C" fn sc_convert(
     }
     *out = Buffer::empty();
     *error = Buffer::empty();
+
+    static QUIET_PANICS: std::sync::Once = std::sync::Once::new();
+    QUIET_PANICS.call_once(|| panic::set_hook(Box::new(|_| {})));
 
     let result = panic::catch_unwind(AssertUnwindSafe(|| {
         let input: &[u8] = if input.is_null() {

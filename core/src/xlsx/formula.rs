@@ -196,17 +196,20 @@ pub struct Context<'a> {
     pub cell: &'a dyn Fn(u32, u32) -> Value,
     pub row_offset: i64,
     pub col_offset: i64,
+    pub last_row: u32,
+    pub last_col: u32,
 }
 
 struct Parser<'a, 'b> {
     tokens: Vec<Token>,
     pos: usize,
+    depth: usize,
     ctx: &'a Context<'b>,
 }
 
 pub fn evaluate(formula: &str, ctx: &Context) -> Option<Value> {
     let tokens = tokenize(formula.trim_start_matches('='))?;
-    let mut parser = Parser { tokens, pos: 0, ctx };
+    let mut parser = Parser { tokens, pos: 0, depth: 0, ctx };
     let value = parser.comparison()?;
     (parser.pos == parser.tokens.len()).then_some(value)
 }
@@ -227,7 +230,21 @@ impl Parser<'_, '_> {
         None
     }
 
+    fn nested<T>(&mut self, parse: impl FnOnce(&mut Self) -> Option<T>) -> Option<T> {
+        if self.depth >= crate::limits::MAX_FORMULA_DEPTH {
+            return None;
+        }
+        self.depth += 1;
+        let value = parse(self);
+        self.depth -= 1;
+        value
+    }
+
     fn comparison(&mut self) -> Option<Value> {
+        self.nested(Self::comparison_inner)
+    }
+
+    fn comparison_inner(&mut self) -> Option<Value> {
         let mut left = self.concat()?;
         while let Some(op) = self.eat_op(&["=", "<>", "<", ">", "<=", ">="]) {
             let right = self.concat()?;
@@ -275,6 +292,10 @@ impl Parser<'_, '_> {
     }
 
     fn unary(&mut self) -> Option<Value> {
+        self.nested(Self::unary_inner)
+    }
+
+    fn unary_inner(&mut self) -> Option<Value> {
         if let Some(op) = self.eat_op(&["-", "+"]) {
             let value = self.unary()?;
             return Some(Value::Num(if op == "-" { -value.number()? } else { value.number()? }));
@@ -304,9 +325,15 @@ impl Parser<'_, '_> {
                     if let Some(Token::Ref { col, row, abs_col, abs_row }) = self.peek().cloned() {
                         self.pos += 1;
                         let (c2, r2) = self.resolve(col, row, abs_col, abs_row)?;
+                        let rows = r1.min(r2)..=r1.max(r2).min(self.ctx.last_row);
+                        let cols = c1.min(c2)..=c1.max(c2).min(self.ctx.last_col);
+                        let count = u64::from(rows.end().saturating_sub(*rows.start()) + 1) * u64::from(cols.end().saturating_sub(*cols.start()) + 1);
+                        if count > crate::limits::MAX_RANGE_CELLS {
+                            return None;
+                        }
                         let mut items = Vec::new();
-                        for r in r1.min(r2)..=r1.max(r2) {
-                            for c in c1.min(c2)..=c1.max(c2) {
+                        for r in rows {
+                            for c in cols.clone() {
                                 items.push((self.ctx.cell)(r, c));
                             }
                         }
