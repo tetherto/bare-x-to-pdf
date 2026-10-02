@@ -34,7 +34,7 @@ jobs:
       - uses: holepunchto/actions/bare-base@v1
         with:
           force-install: true
-      - uses: lukka/get-cmake@latest
+      - uses: lukka/get-cmake@fffaaafeea488556c2c12dad60690008bc1caacb
       - run: rustup toolchain install 1.98.1 --profile minimal
         shell: bash
       - id: host
@@ -48,7 +48,7 @@ jobs:
     runs-on: ubuntu-latest
     name: Core / cargo test
     steps:
-      - uses: actions/checkout@v4
+      - uses: holepunchto/actions/checkout@v1
       - run: rustup toolchain install 1.98.1 --profile minimal
       - run: cargo test --locked
         working-directory: core
@@ -61,7 +61,7 @@ jobs:
           force-install: true
           source: true
           flags: --debug --sanitize address
-      - uses: lukka/get-cmake@latest
+      - uses: lukka/get-cmake@fffaaafeea488556c2c12dad60690008bc1caacb
       - run: rustup toolchain install 1.98.1 --profile minimal
       - uses: holepunchto/actions/compile-prebuilds@v1
         with:
