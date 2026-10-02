@@ -35,6 +35,10 @@ static bool
 simple_converter__string(js_env_t *env, js_value_t *value, char **result) {
   int err;
 
+  bool is_string;
+  err = js_is_string(env, value, &is_string);
+  if (err != 0 || !is_string) return false;
+
   size_t len = 0;
   err = js_get_value_string_utf8(env, value, NULL, 0, &len);
   if (err != 0) return false;
@@ -49,6 +53,12 @@ simple_converter__string(js_env_t *env, js_value_t *value, char **result) {
   }
 
   str[len] = '\0';
+
+  if (strlen(str) != len) {
+    free(str);
+    return false;
+  }
+
   *result = str;
   return true;
 }
@@ -81,10 +91,17 @@ simple_converter__job_init(js_env_t *env, js_callback_info_t *info, bool copy_in
     return false;
   }
 
-  uint8_t *input;
-  size_t input_len;
-  err = js_get_typedarray_info(env, argv[0], NULL, (void **) &input, &input_len, NULL, NULL);
-  if (err != 0) {
+  bool is_typedarray;
+  err = js_is_typedarray(env, argv[0], &is_typedarray);
+  assert(err == 0);
+
+  js_typedarray_type_t type = js_int8array;
+  uint8_t *input = NULL;
+  size_t input_len = 0;
+  if (is_typedarray) {
+    err = js_get_typedarray_info(env, argv[0], &type, (void **) &input, &input_len, NULL, NULL);
+  }
+  if (!is_typedarray || err != 0 || type != js_uint8array) {
     err = js_throw_error(env, NULL, "input must be a Uint8Array");
     assert(err == 0);
     return false;
@@ -96,7 +113,7 @@ simple_converter__job_init(js_env_t *env, js_callback_info_t *info, bool copy_in
 
   if (!ok) {
     simple_converter__job_release(job);
-    err = js_throw_error(env, NULL, "from, to and fontsDir must be strings");
+    err = js_throw_error(env, NULL, "from, to and fontsDir must be strings without NUL characters");
     assert(err == 0);
     return false;
   }

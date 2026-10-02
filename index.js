@@ -30,13 +30,16 @@ const CONVERSIONS = {
   markdown: ['pdf']
 }
 
-const ZIP_MARKERS = [
-  { format: 'odt', marker: 'application/vnd.oasis.opendocument.text' },
-  { format: 'ods', marker: 'application/vnd.oasis.opendocument.spreadsheet' },
-  { format: 'odp', marker: 'application/vnd.oasis.opendocument.presentation' },
-  { format: 'docx', marker: 'word/' },
-  { format: 'pptx', marker: 'ppt/' },
-  { format: 'xlsx', marker: 'xl/' }
+const ODF_MIMETYPES = [
+  { format: 'odt', mimetype: 'application/vnd.oasis.opendocument.text' },
+  { format: 'ods', mimetype: 'application/vnd.oasis.opendocument.spreadsheet' },
+  { format: 'odp', mimetype: 'application/vnd.oasis.opendocument.presentation' }
+]
+
+const OOXML_FOLDERS = [
+  { format: 'docx', folder: 'word/' },
+  { format: 'pptx', folder: 'ppt/' },
+  { format: 'xlsx', folder: 'xl/' }
 ]
 
 const COMPOUND_STREAMS = [
@@ -45,54 +48,131 @@ const COMPOUND_STREAMS = [
   { format: 'xls', name: 'Book' }
 ]
 
-const SIGNATURES = [
-  { format: 'docx', bytes: [0x50, 0x4b, 0x03, 0x04] },
-  { format: 'doc', bytes: [0xd0, 0xcf, 0x11, 0xe0] }
-]
+const MAX_ZIP_NAMES = 65536
+const FLAT_XML_HEAD = 65536
 
 function detect(input) {
-  const bytes = toBytes(input)
-  for (const { format, bytes: magic } of SIGNATURES) {
-    if (bytes.length < magic.length) continue
-    if (!magic.every((b, i) => bytes[i] === b)) continue
-    if (format === 'docx') return detectZip(bytes) || 'docx'
-    if (format === 'doc') return detectCompound(bytes) || 'doc'
-    return format
-  }
-  const head = Buffer.from(
-    bytes.buffer,
-    bytes.byteOffset,
-    Math.min(bytes.byteLength, 4096)
-  ).toString('latin1')
-  if (head.trimStart().startsWith('<?xml') && head.includes('office:document')) {
-    if (head.includes('opendocument.spreadsheet')) return 'fods'
-    if (head.includes('opendocument.presentation')) return 'fodp'
-    return 'fodt'
-  }
-  return null
+  const bytes = view(toBytes(input))
+  if (startsWith(bytes, [0x50, 0x4b, 0x03, 0x04])) return detectZip(bytes)
+  if (startsWith(bytes, [0xd0, 0xcf, 0x11, 0xe0])) return detectCompound(bytes) || 'doc'
+  return detectFlatXml(bytes)
 }
 
 function detectZip(bytes) {
-  const names = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString('latin1')
-  for (const { format, marker } of ZIP_MARKERS) {
-    if (names.includes(marker)) return format
+  const entries = zipEntries(bytes)
+  const mimetype = entries.find((entry) => entry.name === 'mimetype')
+  if (mimetype) {
+    const content = storedContent(bytes, mimetype.offset)
+    const odf = content && ODF_MIMETYPES.find((m) => content.startsWith(m.mimetype))
+    if (odf) return odf.format
+  }
+  for (const { format, folder } of OOXML_FOLDERS) {
+    if (entries.some((entry) => entry.name.startsWith(folder))) return format
   }
   return null
 }
 
-function detectCompound(bytes) {
-  const raw = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength)
-  for (const { format, name } of COMPOUND_STREAMS) {
-    if (raw.includes(Buffer.from(name + '\0', 'utf16le'))) return format
+function zipEntries(bytes) {
+  return centralDirectory(bytes) || localHeaders(bytes)
+}
+
+function centralDirectory(bytes) {
+  const lowest = Math.max(0, bytes.length - 65557)
+  for (let eocd = bytes.length - 22; eocd >= lowest; eocd--) {
+    if (bytes.readUInt32LE(eocd) !== 0x06054b50) continue
+    const count = Math.min(bytes.readUInt16LE(eocd + 10), MAX_ZIP_NAMES)
+    let pos = bytes.readUInt32LE(eocd + 16)
+    const entries = []
+    for (let i = 0; i < count; i++) {
+      if (pos + 46 > bytes.length || bytes.readUInt32LE(pos) !== 0x02014b50) return null
+      const nameLength = bytes.readUInt16LE(pos + 28)
+      const extraLength = bytes.readUInt16LE(pos + 30)
+      const commentLength = bytes.readUInt16LE(pos + 32)
+      const offset = bytes.readUInt32LE(pos + 42)
+      entries.push({ name: bytes.toString('latin1', pos + 46, pos + 46 + nameLength), offset })
+      pos += 46 + nameLength + extraLength + commentLength
+    }
+    return entries
   }
   return null
+}
+
+function localHeaders(bytes) {
+  const entries = []
+  let pos = 0
+  while (
+    entries.length < MAX_ZIP_NAMES &&
+    pos + 30 <= bytes.length &&
+    bytes.readUInt32LE(pos) === 0x04034b50
+  ) {
+    const compressedSize = bytes.readUInt32LE(pos + 18)
+    const nameLength = bytes.readUInt16LE(pos + 26)
+    const extraLength = bytes.readUInt16LE(pos + 28)
+    entries.push({ name: bytes.toString('latin1', pos + 30, pos + 30 + nameLength), offset: pos })
+    if (bytes.readUInt16LE(pos + 6) & 0x08) break
+    pos += 30 + nameLength + extraLength + compressedSize
+  }
+  return entries
+}
+
+function storedContent(bytes, offset) {
+  if (offset + 30 > bytes.length || bytes.readUInt32LE(offset) !== 0x04034b50) return null
+  if (bytes.readUInt16LE(offset + 8) !== 0) return null
+  const size = Math.min(bytes.readUInt32LE(offset + 18), 256)
+  const start = offset + 30 + bytes.readUInt16LE(offset + 26) + bytes.readUInt16LE(offset + 28)
+  return bytes.toString('latin1', start, Math.min(start + size, bytes.length))
+}
+
+function detectCompound(bytes) {
+  for (const { format, name } of COMPOUND_STREAMS) {
+    if (bytes.includes(Buffer.from(name + '\0', 'utf16le'))) return format
+  }
+  return null
+}
+
+function detectFlatXml(bytes) {
+  const start = startsWith(bytes, [0xef, 0xbb, 0xbf]) ? 3 : 0
+  const head = bytes.toString('latin1', start, Math.min(bytes.length, start + FLAT_XML_HEAD))
+  let pos = 0
+  for (;;) {
+    while (pos < head.length && /\s/.test(head[pos])) pos++
+    if (head.startsWith('<?', pos)) pos = skipPast(head, pos, '?>')
+    else if (head.startsWith('<!--', pos)) pos = skipPast(head, pos, '-->')
+    else if (head.startsWith('<!', pos)) pos = skipPast(head, pos, '>')
+    else break
+    if (pos < 0) return null
+  }
+  const root = head.slice(pos, head.indexOf('>', pos) + 1 || undefined)
+  if (!/^<[A-Za-z_][\w.-]*:document[\s>]/.test(root)) return null
+  if (root.includes('opendocument.spreadsheet')) return 'fods'
+  if (root.includes('opendocument.presentation')) return 'fodp'
+  return 'fodt'
+}
+
+function skipPast(text, pos, terminator) {
+  const end = text.indexOf(terminator, pos)
+  return end < 0 ? -1 : end + terminator.length
+}
+
+function startsWith(bytes, magic) {
+  return bytes.length >= magic.length && magic.every((b, i) => bytes[i] === b)
+}
+
+function view(bytes) {
+  return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength)
 }
 
 function prepare(input, opts) {
   const bytes = toBytes(input)
-  const to = normalize(opts.to)
-  if (!to) throw new TypeError('convert: opts.to is required')
+  if (opts.to === undefined || opts.to === null) throw new TypeError('convert: opts.to is required')
+  if (typeof opts.to !== 'string') throw new TypeError('convert: opts.to must be a string')
+  if (!optional(opts.from)) throw new TypeError('convert: opts.from must be a string')
+  if (!optional(opts.fontsDir)) throw new TypeError('convert: opts.fontsDir must be a string')
+  if (opts.fontsDir && opts.fontsDir.includes('\0')) {
+    throw new TypeError('convert: opts.fontsDir must not contain NUL characters')
+  }
 
+  const to = normalize(opts.to)
   const from = normalize(opts.from) || detect(bytes)
   if (!from) throw new Error('convert: could not detect the input format, pass opts.from')
 
@@ -101,6 +181,10 @@ function prepare(input, opts) {
   }
 
   return [bytes, from, to, opts.fontsDir || FONTS_DIR]
+}
+
+function optional(value) {
+  return value === undefined || value === null || typeof value === 'string'
 }
 
 async function convert(input, opts = {}) {
