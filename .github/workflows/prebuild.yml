@@ -67,7 +67,7 @@ jobs:
       - uses: holepunchto/actions/bare-base@v1
         with:
           force-install: true
-      - uses: lukka/get-cmake@latest
+      - uses: lukka/get-cmake@fffaaafeea488556c2c12dad60690008bc1caacb
       - name: Install Rust ${{ matrix.triple }}
         run: rustup toolchain install 1.98.1 --profile minimal --target ${{ matrix.triple }}
         shell: bash

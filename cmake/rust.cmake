@@ -1,6 +1,6 @@
 include_guard(GLOBAL)
 
-set(CORROSION_VERSION "v0.6.1" CACHE STRING "Corrosion release tag")
+set(CORROSION_COMMIT "1499b14e4906a2890f5cee1547c8848db261753d" CACHE STRING "Corrosion commit (v0.6.1)")
 
 bare_platform(_sys)
 bare_arch(_arch)
@@ -49,7 +49,7 @@ endif()
 
 set(Rust_CARGO_TARGET "${_triple}" CACHE STRING "Rust target triple")
 
-fetch_package("github:corrosion-rs/corrosion#${CORROSION_VERSION}")
+fetch_package("github:corrosion-rs/corrosion#${CORROSION_COMMIT}")
 
 corrosion_import_crate(
   MANIFEST_PATH "${CMAKE_CURRENT_SOURCE_DIR}/core/Cargo.toml"
