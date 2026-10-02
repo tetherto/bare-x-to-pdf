@@ -10,7 +10,7 @@ use crate::model::*;
 use crate::xml::{self, Element};
 use color::{parse_clr_map, resolve_child, ColorContext, Theme};
 use std::collections::HashMap;
-use std::io::{Cursor, Read};
+use std::io::Cursor;
 use text::{emu, text_blocks, LevelStyles, TextContext};
 
 const NO_STYLE_TABLE_GRID: &str = "{5940675A-B579-460E-94D1-54222C63F5DA}";
@@ -50,8 +50,12 @@ pub fn read(bytes: &[u8]) -> Result<Document, Error> {
     };
 
     let mut number = 0;
+    let mut seen_targets = std::collections::HashSet::new();
     for id in slide_ids {
         let Some((_, target)) = pres_rels.get(&id) else { continue };
+        if !seen_targets.insert(target.clone()) {
+            continue;
+        }
         let Some(slide) = package.xml(target)? else { continue };
         if slide.attr("show") == Some("0") {
             continue;
@@ -81,8 +85,7 @@ impl<'a> Package<'a> {
     fn read(&mut self, path: &str) -> Result<Option<Vec<u8>>, Error> {
         match self.archive.by_name(path) {
             Ok(mut file) => {
-                let mut data = Vec::new();
-                file.read_to_end(&mut data)?;
+                let data = crate::limits::read_entry(&mut file)?;
                 Ok(Some(data))
             }
             Err(zip::result::ZipError::FileNotFound) => Ok(None),
@@ -170,15 +173,27 @@ pub(crate) fn parse_chart(root: &Element) -> Option<Chart> {
             .or_else(|| el.child("strLit"))
             .or_else(|| el.child("numLit"));
         let Some(cache) = cache else { return Vec::new() };
-        let count = cache.child("ptCount").and_then(|c| c.attr("val")).and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
+        let count = cache
+            .child("ptCount")
+            .and_then(|c| c.attr("val"))
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(0)
+            .min(crate::limits::MAX_CHART_POINTS);
         let mut points = vec![None; count];
         for pt in cache.children("pt") {
             if let (Some(idx), Some(v)) = (pt.attr("idx").and_then(|i| i.parse::<usize>().ok()), pt.child("v")) {
+                if idx >= crate::limits::MAX_CHART_POINTS {
+                    continue;
+                }
                 if idx >= points.len() {
                     points.resize(idx + 1, None);
                 }
                 points[idx] = Some(v.text());
             }
+        }
+        if points.len() > 4096 {
+            let used = points.iter().rposition(Option::is_some).map_or(0, |i| i + 1);
+            points.truncate(used);
         }
         points
     };
@@ -1135,7 +1150,7 @@ fn parse_table(tbl: &Element, ctx: &SlideCtx) -> Table {
             }
             let tc_pr = tc.child("tcPr");
             let mut cell = Cell {
-                span: tc.attr("gridSpan").and_then(|v| v.parse().ok()).unwrap_or(1),
+                span: tc.attr("gridSpan").and_then(|v| v.parse().ok()).map_or(1, crate::limits::span),
                 ..Cell::default()
             };
             if tc.attr("vMerge") == Some("1") {
@@ -1276,14 +1291,14 @@ fn custom_path(geom: &Element) -> Option<Vec<PathCommand>> {
                     current = *p;
                 }
                 ("arcTo", _) => {
-                    let angle = |name: &str| cmd.attr(name).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0) / 60000.0;
+                    let angle = |name: &str| cmd.attr(name).and_then(|v| v.parse::<f64>().ok()).filter(|v| v.is_finite()).unwrap_or(0.0) / 60000.0;
                     let rw = cmd.attr("wR").and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0) / w;
                     let rh = cmd.attr("hR").and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0) / h;
                     let start = angle("stAng").to_radians();
-                    let sweep = angle("swAng").to_radians();
+                    let sweep = angle("swAng").to_radians().clamp(-std::f64::consts::TAU, std::f64::consts::TAU);
                     let cx = current.0 - rw * start.cos();
                     let cy = current.1 - rh * start.sin();
-                    let steps = ((sweep.abs() / (std::f64::consts::PI / 8.0)).ceil() as usize).max(1);
+                    let steps = ((sweep.abs() / (std::f64::consts::PI / 8.0)).ceil() as usize).clamp(1, 64);
                     for i in 1..=steps {
                         let a = start + sweep * i as f64 / steps as f64;
                         current = (cx + rw * a.cos(), cy + rh * a.sin());

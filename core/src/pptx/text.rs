@@ -341,8 +341,8 @@ fn paragraph(p: &Element, ctx: &TextContext, counters: &mut HashMap<usize, i64>)
         match &ppr.bullet {
             Some(Bullet::Char(ch)) => Some(bullet_label(ch, &ppr, &last_props, size)),
             Some(Bullet::AutoNum { scheme, start }) => {
-                let count = counters.entry(level).or_insert(start - 1);
-                *count += 1;
+                let count = counters.entry(level).or_insert(start.saturating_sub(1));
+                *count = count.saturating_add(1);
                 let value = *count;
                 counters.retain(|l, _| *l <= level);
                 let text = auto_number(scheme, value);

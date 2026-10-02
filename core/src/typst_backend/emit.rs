@@ -85,8 +85,9 @@ impl Emitter<'_> {
 
         let header = self.margin_slot(section, true, index);
         let footer = self.margin_slot(section, false, index);
-        let columns = if section.columns > 1 {
-            format!(", columns: {}", section.columns)
+        let section_columns = section.columns.min(crate::limits::MAX_TEXT_COLUMNS);
+        let columns = if section_columns > 1 {
+            format!(", columns: {section_columns}")
         } else {
             String::new()
         };
@@ -100,11 +101,11 @@ impl Emitter<'_> {
             pt(page.margin.left + self.text_shift()),
             pt(page.margin.right - self.text_shift())
         );
-        if section.columns > 1 {
+        if section_columns > 1 {
             let _ = writeln!(self.out, "#set columns(gutter: {})", pt(section.column_gap));
         }
         if let Some(start) = section.page_start {
-            let _ = writeln!(self.out, "#counter(page).update({start})");
+            let _ = writeln!(self.out, "#counter(page).update({})", start.clamp(0, i64::from(u32::MAX)));
         }
         let _ = writeln!(self.out, "#metadata(none) <section-{index}>");
         for anchor in &section.anchors {
@@ -250,7 +251,7 @@ impl Emitter<'_> {
 
     fn columns_block(&self, c: &ColumnsBlock, out: &mut String) {
         let body = self.blocks(&c.blocks, false);
-        let n = c.count.max(1);
+        let n = c.count.clamp(1, crate::limits::MAX_TEXT_COLUMNS);
         let gap = pt(c.gap);
         if !c.balanced {
             let _ = writeln!(out, "#columns({n}, gutter: {gap})[{body}]");
@@ -270,7 +271,7 @@ impl Emitter<'_> {
         let mut separators = String::new();
         if let Some(sep) = c.separator {
             let offset = match sep.valign {
-                VAlign::Top => "0".to_string(),
+                VAlign::Top => "0pt".to_string(),
                 VAlign::Center => format!("h * {} / 2", trim_num(1.0 - sep.height)),
                 VAlign::Bottom => format!("h * {}", trim_num(1.0 - sep.height)),
             };
@@ -1233,9 +1234,25 @@ impl Emitter<'_> {
 
     fn table_expr(&self, table: &Table) -> String {
         self.table_depth.set(self.table_depth.get() + 1);
-        let expr = self.table_expr_inner(table);
+        let expr = if self.table_depth.get() > crate::limits::MAX_TABLE_DEPTH {
+            self.flattened_table(table)
+        } else {
+            self.table_expr_inner(table)
+        };
         self.table_depth.set(self.table_depth.get() - 1);
         expr
+    }
+
+    fn flattened_table(&self, table: &Table) -> String {
+        let mut flat: Vec<Block> = Vec::new();
+        let mut pending: Vec<&Block> = table.rows.iter().rev().flat_map(|row| row.cells.iter().rev()).flat_map(|cell| cell.blocks.iter().rev()).collect();
+        while let Some(block) = pending.pop() {
+            match block {
+                Block::Table(inner) => pending.extend(inner.rows.iter().rev().flat_map(|row| row.cells.iter().rev()).flat_map(|cell| cell.blocks.iter().rev())),
+                other => flat.push(other.clone()),
+            }
+        }
+        format!("block[{}]", self.blocks(&flat, false))
     }
 
     fn table_expr_inner(&self, table: &Table) -> String {
@@ -1245,10 +1262,10 @@ impl Emitter<'_> {
         let grid = table
             .rows
             .iter()
-            .map(|r| r.cells.iter().map(|c| c.span).sum::<usize>())
+            .map(|r| r.cells.iter().fold(0usize, |sum, c| sum.saturating_add(crate::limits::span(c.span))))
             .max()
             .unwrap_or(0)
-            .max(1);
+            .clamp(1, crate::limits::MAX_TABLE_SPAN);
         let fixed_columns = table.columns.len() >= grid;
 
         let mut defaults = CellMargins {
@@ -1271,7 +1288,7 @@ impl Emitter<'_> {
                         if let Some(&anchor) = open.get(&column) {
                             cells[anchor].rowspan += 1;
                         }
-                        column += cell.span;
+                        column += crate::limits::span(cell.span);
                         continue;
                     }
                     Some(VerticalMerge::Restart) => {
@@ -1292,8 +1309,13 @@ impl Emitter<'_> {
                     }
                 }
 
-                let visible: Vec<Block> = cell.blocks.iter().filter(|b| !matches!(b, Block::Paragraph(p) if paragraph_hidden(p))).cloned().collect();
-                let mut body = self.blocks(&visible, true);
+                let hidden = |b: &Block| matches!(b, Block::Paragraph(p) if paragraph_hidden(p));
+                let mut body = if cell.blocks.iter().any(hidden) {
+                    let visible: Vec<Block> = cell.blocks.iter().filter(|b| !hidden(b)).cloned().collect();
+                    self.blocks(&visible, true)
+                } else {
+                    self.blocks(&cell.blocks, true)
+                };
                 if let (Some(shift), false) = (cell.overflow_shift, body.trim().is_empty()) {
                     let clip = cell.overflow_width.unwrap_or(1.0);
                     body = format!(
@@ -1328,7 +1350,7 @@ impl Emitter<'_> {
                     ("top", pick(cell.borders.top, ri == 0, table.borders.top, table.borders.inside_h)),
                     ("bottom", pick(cell.borders.bottom, ri == last_row, table.borders.bottom, table.borders.inside_h)),
                     ("left", pick(cell.borders.left, column == 0, table.borders.left, table.borders.inside_v)),
-                    ("right", pick(cell.borders.right, column + cell.span >= grid, table.borders.right, table.borders.inside_v)),
+                    ("right", pick(cell.borders.right, column + crate::limits::span(cell.span) >= grid, table.borders.right, table.borders.inside_v)),
                 ];
 
                 let border_top = match borders[0].1 {
@@ -1380,12 +1402,12 @@ impl Emitter<'_> {
                 }
 
                 cells.push(CellOut {
-                    colspan: cell.span,
+                    colspan: crate::limits::span(cell.span),
                     rowspan: 1,
                     args,
                     body,
                 });
-                column += cell.span;
+                column += crate::limits::span(cell.span);
             }
         }
 
@@ -1508,7 +1530,7 @@ fn split_tokens(text: &str) -> Vec<String> {
 }
 
 fn trim_num(value: f64) -> String {
-    let rounded = (value * 1000.0).round() / 1000.0;
+    let rounded = (crate::limits::finite(value) * 1000.0).round() / 1000.0;
     format!("{rounded}")
 }
 
@@ -1568,7 +1590,7 @@ fn tuple(items: &[String]) -> String {
 }
 
 pub fn pt(value: f64) -> String {
-    let rounded = (value * 1000.0).round() / 1000.0;
+    let rounded = (crate::limits::finite(value) * 1000.0).round() / 1000.0;
     if rounded == 0.0 {
         return "0pt".to_string();
     }
@@ -1600,9 +1622,10 @@ pub fn typst_str(text: &str) -> String {
         match ch {
             '\\' => out.push_str("\\\\"),
             '"' => out.push_str("\\\""),
-            c if (c as u32) < 0x20 || c == '\u{7f}' => {
-                let _ = write!(out, "\\u{{{:x}}}", c as u32);
+            '\t' | '\n' | '\r' => {
+                let _ = write!(out, "\\u{{{:x}}}", ch as u32);
             }
+            c if (c as u32) < 0x20 || c == '\u{7f}' => {}
             c => out.push(c),
         }
     }

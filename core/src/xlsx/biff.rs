@@ -275,8 +275,9 @@ pub fn read(bytes: &[u8]) -> Result<Document, Error> {
     let by_offset: HashMap<usize, usize> = records.iter().enumerate().map(|(i, r)| (r.offset, i)).collect();
 
     let mut sheets: Vec<Option<(Sheet, Vec<(usize, biff_chart::ChartSource)>)>> = Vec::new();
+    let mut seen_offsets = std::collections::HashSet::new();
     for (index, entry) in globals.sheets.iter().enumerate() {
-        let Some(&start) = by_offset.get(&entry.offset).filter(|_| entry.worksheet) else {
+        let Some(&start) = by_offset.get(&entry.offset).filter(|_| entry.worksheet && seen_offsets.insert(entry.offset)) else {
             sheets.push(None);
             continue;
         };
@@ -323,7 +324,7 @@ pub fn read(bytes: &[u8]) -> Result<Document, Error> {
         }
         parsed.push((entry.name.clone(), sheet));
     }
-    Ok(workbook_document(workbook_defaults(), &parsed, &globals.styles))
+    workbook_document(workbook_defaults(), &parsed, &globals.styles)
 }
 
 fn chart_cells(sheets: &[Option<(Sheet, Vec<(usize, biff_chart::ChartSource)>)>], globals: &Globals, area: &biff_chart::Area) -> Vec<biff_chart::Cell> {
@@ -331,8 +332,11 @@ fn chart_cells(sheets: &[Option<(Sheet, Vec<(usize, biff_chart::ChartSource)>)>]
         return Vec::new();
     };
     let mut out = Vec::new();
-    for row in area.row1..=area.row2.min(area.row1 + 4096) {
+    'rows: for row in area.row1..=area.row2.min(area.row1 + 4096) {
         for col in area.col1..=area.col2.min(area.col1 + 256) {
+            if out.len() >= biff_chart::MAX_SERIES_POINTS {
+                break 'rows;
+            }
             let cell = sheet.rows.get(&(row + 1)).and_then(|r| r.cells.get(&(col + 1)));
             out.push(match cell.map(|c| (&c.value, c.style)) {
                 Some((&CellValue::Number(v), style)) => {
@@ -872,6 +876,7 @@ fn read_sheet(records: &[Record], globals: &Globals, print_area: Option<(u32, u3
     let shapes = biff_art::shapes(&drawing);
     let paired = shapes.len() == objects.len();
     let mut chart_sources = chart_streams.iter().map(|s| biff_chart::parse(s));
+    let mut image_bytes = 0usize;
     for (index, shape) in shapes.iter().enumerate() {
         let is_chart = paired && objects[index].0 == 5;
         let chart = if is_chart { chart_sources.next().flatten() } else { None };
@@ -880,7 +885,13 @@ fn read_sheet(records: &[Record], globals: &Globals, print_area: Option<(u32, u3
             continue;
         }
         let content = match (shape.picture.and_then(|i| globals.blips.get(i)), chart) {
-            (Some(Some(image)), _) => DrawingContent::Image(image.clone()),
+            (Some(Some(image)), _) => {
+                image_bytes += image.data.len();
+                if image_bytes > crate::limits::MAX_IMAGE_BYTES {
+                    continue;
+                }
+                DrawingContent::Image(image.clone())
+            }
             (_, Some(source)) => {
                 charts.push((drawings.len(), source));
                 DrawingContent::Placeholder(None)

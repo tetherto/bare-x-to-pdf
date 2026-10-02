@@ -4,7 +4,7 @@ use crate::error::Error;
 use crate::model::*;
 use crate::xml::{self, Element};
 use std::collections::HashMap;
-use std::io::{Cursor, Read};
+use std::io::Cursor;
 
 struct Package {
     content: Element,
@@ -30,14 +30,12 @@ fn package(bytes: &[u8]) -> Result<Package, Error> {
             continue;
         }
         if name.starts_with("Pictures/") || name.starts_with("media/") {
-            let mut data = Vec::new();
-            file.read_to_end(&mut data)?;
+            let data = crate::limits::read_entry(&mut file)?;
             if let Some(format) = ImageFormat::sniff(&data) {
                 media.insert(name, ImageData { data, format });
             }
         } else if name.starts_with("Object ") && name.ends_with("/content.xml") {
-            let mut data = Vec::new();
-            file.read_to_end(&mut data)?;
+            let data = crate::limits::read_entry(&mut file)?;
             if let Ok(root) = xml::parse(&data) {
                 objects.insert(name.trim_end_matches("/content.xml").to_string(), root);
             }

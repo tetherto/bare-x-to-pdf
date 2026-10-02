@@ -121,6 +121,12 @@ impl<'a> Reader<'a> {
             self.pending = Pending::Paragraph;
         }
         let props = self.run();
+        if let Some(Inline::Text { text: last, props: last_props }) = self.inlines.last_mut() {
+            if *last_props == props {
+                last.push_str(text);
+                return;
+            }
+        }
         self.inlines.push(Inline::Text { text: text.to_string(), props });
     }
 

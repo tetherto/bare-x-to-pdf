@@ -548,7 +548,7 @@ impl Styles {
         let el = self.raw.get(&format!("section:{name}"))?;
         let props = el.child("section-properties")?;
         let columns = props.child("columns")?;
-        let count: usize = columns.attr("column-count").and_then(|v| v.parse().ok()).unwrap_or(1);
+        let count: usize = columns.attr("column-count").and_then(|v| v.parse().ok()).map_or(1, |n: usize| n.clamp(1, crate::limits::MAX_TEXT_COLUMNS));
         let gap = columns.attr("column-gap").and_then(length).unwrap_or(0.0);
         let separator = columns.child("column-sep").map(|sep| ColumnSeparator {
             width: sep.attr("width").and_then(length).unwrap_or(0.25).max(0.25),
@@ -945,7 +945,7 @@ fn parse_page_layout(el: &Element) -> PageLayout {
             page.margin.right = v;
         }
         if let Some(cols) = p.child("columns") {
-            columns = cols.attr("column-count").and_then(|c| c.parse().ok()).unwrap_or(1);
+            columns = cols.attr("column-count").and_then(|c| c.parse().ok()).map_or(1, |n: usize| n.clamp(1, crate::limits::MAX_TEXT_COLUMNS));
             gap = cols.attr("column-gap").and_then(length).unwrap_or(0.0);
         }
     }

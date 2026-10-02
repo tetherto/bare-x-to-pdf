@@ -82,12 +82,16 @@ pub fn read(bytes: &[u8]) -> Result<Document, Error> {
         .map(|s| s.children("sheet").collect())
         .unwrap_or_default();
     let mut parsed_sheets = Vec::new();
+    let mut seen_paths = std::collections::HashSet::new();
     for (index, sheet) in sheets.iter().enumerate() {
         if matches!(sheet.attr("state"), Some("hidden") | Some("veryHidden")) {
             continue;
         }
         let Some(rid) = sheet.attr("r:id").or(sheet.attr("id")) else { continue };
         let Some(path) = targets.get(rid) else { continue };
+        if !seen_paths.insert(path.clone()) {
+            continue;
+        }
         let Some(data) = entry(&mut archive, path)? else { continue };
         let root = xml::parse(&data)?;
         let name = sheet.attr("name").unwrap_or("Sheet").to_string();
@@ -106,7 +110,7 @@ pub fn read(bytes: &[u8]) -> Result<Document, Error> {
         }
         parsed_sheets.push((name, parsed));
     }
-    Ok(workbook_document(doc, &parsed_sheets, &styles))
+    workbook_document(doc, &parsed_sheets, &styles)
 }
 
 fn workbook_defaults() -> Document {
@@ -135,14 +139,15 @@ fn auto_row_heights(sheet: &mut Sheet, styles: &Styles) {
     }
 }
 
-fn workbook_document(mut doc: Document, parsed_sheets: &[(String, Sheet)], styles: &Styles) -> Document {
+fn workbook_document(mut doc: Document, parsed_sheets: &[(String, Sheet)], styles: &Styles) -> Result<Document, Error> {
+    let mut cells = 0u64;
     let any_content = parsed_sheets.iter().any(|(_, s)| s.last_row > 0 && s.last_col > 0);
     for (index, (name, parsed)) in parsed_sheets.iter().enumerate() {
         let empty = parsed.last_row == 0 || parsed.last_col == 0;
         if empty && (any_content || index > 0) {
             continue;
         }
-        doc.sections.extend(paginate(parsed, name, styles));
+        doc.sections.extend(paginate(parsed, name, styles, &mut cells)?);
     }
     if doc.sections.is_empty() {
         doc.sections.push(Section {
@@ -159,7 +164,7 @@ fn workbook_document(mut doc: Document, parsed_sheets: &[(String, Sheet)], style
             ..Section::default()
         });
     }
-    doc
+    Ok(doc)
 }
 
 fn sheet_col_width(sheet: &Sheet, col: u32) -> f64 {
@@ -283,8 +288,7 @@ fn read_drawings<R: Read + std::io::Seek>(
 fn entry<R: Read + std::io::Seek>(archive: &mut zip::ZipArchive<R>, name: &str) -> Result<Option<Vec<u8>>, Error> {
     match archive.by_name(name) {
         Ok(mut file) => {
-            let mut data = Vec::new();
-            file.read_to_end(&mut data)?;
+            let data = crate::limits::read_entry(&mut file)?;
             Ok(Some(data))
         }
         Err(zip::result::ZipError::FileNotFound) => Ok(None),
@@ -354,7 +358,13 @@ fn conditional_dxf<'a>(sheet: &Sheet, styles: &'a Styles, row: u32, col: u32, va
     rules.sort_by_key(|r| r.priority);
     let cells = |r: u32, c: u32| cell_value(sheet, r, c);
     for rule in rules {
-        let ctx = formula::Context { cell: &cells, row_offset: row as i64 - rule.origin.0 as i64, col_offset: col as i64 - rule.origin.1 as i64 };
+        let ctx = formula::Context {
+            cell: &cells,
+            row_offset: row as i64 - rule.origin.0 as i64,
+            col_offset: col as i64 - rule.origin.1 as i64,
+            last_row: sheet.last_row,
+            last_col: sheet.last_col,
+        };
         let operand = |i: usize| rule.formulas.get(i).and_then(|f| formula::evaluate(f, &ctx));
         let number = |v: &formula::Value| match v {
             formula::Value::Num(n) => Some(*n),
@@ -724,12 +734,16 @@ fn column_index(reference: &str) -> Option<(u32, u32)> {
     let mut row = 0u32;
     for c in reference.chars() {
         if c.is_ascii_alphabetic() {
-            col = col * 26 + (c.to_ascii_uppercase() as u32 - 'A' as u32 + 1);
+            col = col.checked_mul(26)?.checked_add(c.to_ascii_uppercase() as u32 - 'A' as u32 + 1)?;
         } else if c.is_ascii_digit() {
-            row = row * 10 + c.to_digit(10)?;
+            row = row.checked_mul(10)?.checked_add(c.to_digit(10)?)?;
         }
     }
-    if col == 0 || row == 0 { None } else { Some((col, row)) }
+    if col == 0 || row == 0 || col > crate::limits::MAX_SHEET_COLUMNS || row > crate::limits::MAX_SHEET_ROWS {
+        None
+    } else {
+        Some((col, row))
+    }
 }
 
 fn parse_range(range: &str) -> Option<(u32, u32, u32, u32)> {
@@ -819,7 +833,7 @@ fn parse_sheet(root: &Element, styles: &Styles, shared: &[Vec<(String, RunProps)
     let mut max_row = 0u32;
     if let Some(data) = root.child("sheetData") {
         for row in data.children("row") {
-            let Some(r) = row.attr("r").and_then(|v| v.parse::<u32>().ok()) else { continue };
+            let Some(r) = row.attr("r").and_then(|v| v.parse::<u32>().ok()).filter(|r| (1..=crate::limits::MAX_SHEET_ROWS).contains(r)) else { continue };
             let mut row_data = RowData {
                 height: row.attr("ht").and_then(|v| v.parse().ok()),
                 custom_height: all_custom || matches!(row.attr("customHeight"), Some("1") | Some("true")),
@@ -1088,7 +1102,7 @@ fn paper_size(code: u32) -> (f64, f64) {
     }
 }
 
-fn paginate(sheet: &Sheet, name: &str, styles: &Styles) -> Vec<Section> {
+fn paginate(sheet: &Sheet, name: &str, styles: &Styles, cells: &mut u64) -> Result<Vec<Section>, Error> {
     let page = &sheet.page;
     let band = styles.font(0).size.unwrap_or(10.0) * 1.117 + 7.1;
     let top_margin = match (&page.header, page.body_top) {
@@ -1128,7 +1142,7 @@ fn paginate(sheet: &Sheet, name: &str, styles: &Styles) -> Vec<Section> {
         };
         section.header_default = page.header.as_deref().map(|h| header_footer(h, name, page.width - page.margin_left - page.margin_right, styles.font(0), page.scale));
         section.footer_default = page.footer.as_deref().map(|f| header_footer(f, name, page.width - page.margin_left - page.margin_right, styles.font(0), page.scale));
-        return vec![section];
+        return Ok(vec![section]);
     }
     let printable_w = page.width - page.margin_left - page.margin_right;
     let printable_h = page.height - top_margin - bottom_margin;
@@ -1161,18 +1175,18 @@ fn paginate(sheet: &Sheet, name: &str, styles: &Styles) -> Vec<Section> {
     let col_groups = group(&cols, |c| col_w(c) * scale, printable_w, &sheet.col_breaks);
     let row_groups = group(&rows, |r| row_h(r) * scale, printable_h, &sheet.row_breaks);
 
-    let mut order: Vec<(&Vec<u32>, &Vec<u32>)> = Vec::new();
+    let pages = printed_pages(sheet, styles, &row_groups, &col_groups);
+    let mut keys: Vec<(usize, usize)> = pages.into_iter().collect();
     if page.over_then_down {
-        for rg in &row_groups {
-            for cg in &col_groups {
-                order.push((rg, cg));
-            }
-        }
+        keys.sort_unstable();
     } else {
-        for cg in &col_groups {
-            for rg in &row_groups {
-                order.push((rg, cg));
-            }
+        keys.sort_unstable_by_key(|&(r, c)| (c, r));
+    }
+    let order: Vec<(&Vec<u32>, &Vec<u32>)> = keys.into_iter().map(|(r, c)| (&row_groups[r], &col_groups[c])).collect();
+    for (rg, cg) in &order {
+        *cells += (rg.len() * cg.len()) as u64;
+        if *cells > crate::limits::MAX_SHEET_CELLS {
+            return Err(Error::new(format!("the spreadsheet is too large to convert: more than {} cells to print", crate::limits::MAX_SHEET_CELLS)));
         }
     }
 
@@ -1237,7 +1251,7 @@ fn paginate(sheet: &Sheet, name: &str, styles: &Styles) -> Vec<Section> {
         };
         sections.push(section);
     }
-    sections
+    Ok(sections)
 }
 
 fn page_notes(sheet: &Sheet, rows: &[u32], cols: &[u32], left: f64, top: f64, scale: f64) -> Vec<PageNote> {
@@ -1310,6 +1324,58 @@ fn overflow_source(sheet: &Sheet, styles: &Styles, data: Option<&RowData>, col: 
         k -= 1;
     }
     None
+}
+
+fn printed_pages(sheet: &Sheet, styles: &Styles, row_groups: &[Vec<u32>], col_groups: &[Vec<u32>]) -> std::collections::BTreeSet<(usize, usize)> {
+    let find = |groups: &[Vec<u32>], item: u32| -> Option<usize> {
+        let index = groups.partition_point(|g| g.first().is_some_and(|first| *first <= item)).checked_sub(1)?;
+        groups[index].binary_search(&item).is_ok().then_some(index)
+    };
+    let mut pages = std::collections::BTreeSet::new();
+    let mut mark = |row: u32, col: u32| {
+        if let (Some(r), Some(c)) = (find(row_groups, row), find(col_groups, col)) {
+            pages.insert((r, c));
+        }
+    };
+    let col_w = |c: u32| sheet.col_widths.get((c - 1) as usize).copied().unwrap_or(48.0);
+    for (&row, data) in &sheet.rows {
+        for (&col, cell) in &data.cells {
+            let xf = styles.xf(cell.style);
+            if !matches!(cell.value, CellValue::Empty) || xf.fill.is_some() || has_border(&xf.borders) {
+                mark(row, col);
+            }
+            let CellValue::Text(parts) = &cell.value else { continue };
+            if xf.wrap || !matches!(xf.h_align, None | Some(Align::Left)) {
+                continue;
+            }
+            let chars: usize = parts.iter().map(|(t, _)| t.chars().count()).sum();
+            let size = styles.font(xf.font).size.unwrap_or(11.0);
+            let mut remaining = chars as f64 * size * 0.5 - col_w(col);
+            let mut next = col + 1;
+            while remaining > 0.0 && next <= sheet.last_col {
+                if data.cells.get(&next).is_some_and(|c| !matches!(c.value, CellValue::Empty)) {
+                    break;
+                }
+                mark(row, next);
+                remaining -= col_w(next);
+                next += 1;
+            }
+        }
+    }
+    for &(r1, c1, _, _) in &sheet.merges {
+        mark(r1, c1);
+    }
+    for &(row, col) in sheet.notes.keys() {
+        mark(row, col);
+    }
+    for drawing in &sheet.drawings {
+        let (col, row) = cell_at(sheet, drawing.x + 0.01, drawing.y + 0.01);
+        mark(row, col);
+    }
+    if pages.is_empty() && !row_groups.is_empty() && !col_groups.is_empty() {
+        pages.insert((0, 0));
+    }
+    pages
 }
 
 fn group(items: &[u32], size: impl Fn(u32) -> f64, limit: f64, breaks: &[u32]) -> Vec<Vec<u32>> {

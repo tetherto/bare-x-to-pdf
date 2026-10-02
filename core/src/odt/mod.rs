@@ -23,8 +23,7 @@ pub fn read(bytes: &[u8]) -> Result<Document, Error> {
             let mut file = archive.by_index(i)?;
             let name = file.name().to_string();
             if name.starts_with("Pictures/") && !file.is_dir() {
-                let mut data = Vec::new();
-                file.read_to_end(&mut data)?;
+                let data = crate::limits::read_entry(&mut file)?;
                 if let Some(format) = ImageFormat::sniff(&data) {
                     media.insert(name, ImageData { data, format });
                 }
@@ -116,8 +115,7 @@ fn find_config_item<'a>(el: &'a Element, name: &str) -> Option<String> {
 fn entry<R: Read + std::io::Seek>(archive: &mut zip::ZipArchive<R>, name: &str) -> Result<Option<Vec<u8>>, Error> {
     match archive.by_name(name) {
         Ok(mut file) => {
-            let mut data = Vec::new();
-            file.read_to_end(&mut data)?;
+            let data = crate::limits::read_entry(&mut file)?;
             Ok(Some(data))
         }
         Err(zip::result::ZipError::FileNotFound) => Ok(None),
@@ -402,9 +400,9 @@ impl Reader<'_> {
                     }
                 }
                 if values[level] == 0 {
-                    values[level] = *start - 1;
+                    values[level] = start.saturating_sub(1);
                 }
-                values[level] += 1;
+                values[level] = values[level].saturating_add(1);
                 for deeper in level + 1..values.len() {
                     values[deeper] = 0;
                 }
@@ -447,7 +445,7 @@ impl Reader<'_> {
                     }
                     "a" => self.inlines(el, base, out, anchors),
                     "s" => {
-                        let count = el.attr("c").and_then(|c| c.parse::<usize>().ok()).unwrap_or(1);
+                        let count = el.attr("c").and_then(|c| c.parse::<usize>().ok()).unwrap_or(1).min(crate::limits::MAX_REPEATED_SPACES);
                         out.push(Inline::Text { text: " ".repeat(count), props: base.clone() });
                     }
                     "tab" => out.push(Inline::Tab),
@@ -603,7 +601,13 @@ impl Reader<'_> {
             }
         }
         if table.columns.is_empty() {
-            let count = table.rows.iter().map(|r| r.cells.iter().map(|c| c.span).sum::<usize>()).max().unwrap_or(1);
+            let count = table
+                .rows
+                .iter()
+                .map(|r| r.cells.iter().fold(0usize, |sum, c| sum.saturating_add(c.span)))
+                .max()
+                .unwrap_or(1)
+                .clamp(1, crate::limits::MAX_TABLE_SPAN);
             table.columns = vec![468.0 / count as f64; count];
         }
         table
@@ -646,7 +650,7 @@ impl Reader<'_> {
                     for _ in 0..repeat {
                         let mut cell = Cell {
                             blocks: blocks.clone(),
-                            span: tc.attr("number-columns-spanned").and_then(|v| v.parse().ok()).unwrap_or(1),
+                            span: tc.attr("number-columns-spanned").and_then(|v| v.parse().ok()).map_or(1, crate::limits::span),
                             ..Cell::default()
                         };
                         if tc.attr("number-rows-spanned").and_then(|v| v.parse::<usize>().ok()).unwrap_or(1) > 1 {

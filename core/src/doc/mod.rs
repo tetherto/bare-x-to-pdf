@@ -34,6 +34,8 @@ pub fn read(bytes: &[u8]) -> Result<Document, Error> {
         chpx_fkps: file.fkps(file.fib.fc_lcb(12))?,
         papx_fkps: file.fkps(file.fib.fc_lcb(13))?,
         counters: std::cell::RefCell::new(HashMap::new()),
+        extracted: std::cell::Cell::new(0),
+        image_bytes: std::cell::Cell::new(0),
     };
 
     let main_end = file.fib.ccp_text;
@@ -369,7 +371,7 @@ impl File {
         let (fc_clx, lcb_clx) = self.fib.fc_lcb(33);
         let clx = self
             .table
-            .get(fc_clx as usize..(fc_clx + lcb_clx) as usize)
+            .get(fc_clx as usize..fc_clx.saturating_add(lcb_clx) as usize)
             .ok_or_else(|| Error::new("piece table is out of range"))?;
         let mut pos = 0;
         while pos < clx.len() {
@@ -380,7 +382,7 @@ impl File {
                 }
                 2 => {
                     let lcb = u32_at(clx, pos + 1) as usize;
-                    let plc = &clx[pos + 5..(pos + 5 + lcb).min(clx.len())];
+                    let plc = clx.get(pos + 5..pos.saturating_add(5).saturating_add(lcb).min(clx.len())).unwrap_or(&[]);
                     let n = (plc.len().saturating_sub(4)) / 12;
                     let mut pieces = Vec::with_capacity(n);
                     for i in 0..n {
@@ -402,7 +404,7 @@ impl File {
 
     fn fonts(&self) -> Vec<String> {
         let (fc, lcb) = self.fib.fc_lcb(15);
-        let Some(sttb) = self.table.get(fc as usize..(fc + lcb) as usize) else { return Vec::new() };
+        let Some(sttb) = self.table.get(fc as usize..fc.saturating_add(lcb) as usize) else { return Vec::new() };
         let mut fonts = Vec::new();
         let mut pos = 0;
         if u16_at(sttb, 0) == 0xFFFF {
@@ -441,10 +443,10 @@ impl File {
         let (fc, lcb) = self.fib.fc_lcb(1);
         let stsh = self
             .table
-            .get(fc as usize..(fc + lcb) as usize)
+            .get(fc as usize..fc.saturating_add(lcb) as usize)
             .ok_or_else(|| Error::new("stylesheet is out of range"))?;
         let cb_stshi = u16_at(stsh, 0) as usize;
-        let stshi = &stsh[2..(2 + cb_stshi).min(stsh.len())];
+        let stshi = stsh.get(2..(2 + cb_stshi).min(stsh.len())).unwrap_or(&[]);
         let cstd = u16_at(stshi, 0) as usize;
         let cb_std_base = u16_at(stshi, 2) as usize;
         let default_ftc = u16_at(stshi, 12) as usize;
@@ -634,7 +636,7 @@ impl File {
 }
 
 fn parse_fkp(page: &[u8]) -> Fkp {
-    let crun = page[511] as usize;
+    let crun = (page.get(511).copied().unwrap_or(0) as usize).min(101);
     let mut fcs = Vec::with_capacity(crun + 1);
     for i in 0..=crun {
         fcs.push(u32_at(page, i * 4));
@@ -643,15 +645,15 @@ fn parse_fkp(page: &[u8]) -> Fkp {
     let mut entries = Vec::with_capacity(crun);
     let mut istds = Vec::with_capacity(crun);
     for i in 0..crun {
-        let offset_byte = page[base + i];
+        let offset_byte = page.get(base + i).copied().unwrap_or(0);
         if offset_byte == 0 {
             entries.push(Vec::new());
             istds.push(0);
             continue;
         }
         let at = offset_byte as usize * 2;
-        let cb = page[at] as usize;
-        let grpprl = &page[at + 1..(at + 1 + cb).min(512)];
+        let cb = page.get(at).copied().unwrap_or(0) as usize;
+        let grpprl = page.get(at + 1..(at + 1 + cb).min(page.len())).unwrap_or(&[]);
         entries.push(grpprl.to_vec());
         istds.push(0);
     }
@@ -659,7 +661,7 @@ fn parse_fkp(page: &[u8]) -> Fkp {
 }
 
 fn parse_papx_fkp(page: &[u8]) -> Fkp {
-    let cpara = page[511] as usize;
+    let cpara = (page.get(511).copied().unwrap_or(0) as usize).min(29);
     let mut fcs = Vec::with_capacity(cpara + 1);
     for i in 0..=cpara {
         fcs.push(u32_at(page, i * 4));
@@ -668,22 +670,22 @@ fn parse_papx_fkp(page: &[u8]) -> Fkp {
     let mut entries = Vec::with_capacity(cpara);
     let mut istds = Vec::with_capacity(cpara);
     for i in 0..cpara {
-        let bx = page[base + i * 13];
+        let bx = page.get(base + i * 13).copied().unwrap_or(0);
         if bx == 0 {
             entries.push(Vec::new());
             istds.push(0);
             continue;
         }
         let at = bx as usize * 2;
-        let mut cb = page[at] as usize;
+        let mut cb = page.get(at).copied().unwrap_or(0) as usize;
         let mut start = at + 1;
         if cb == 0 {
-            cb = page[at + 1] as usize * 2;
+            cb = page.get(at + 1).copied().unwrap_or(0) as usize * 2;
             start = at + 2;
         } else {
             cb = cb * 2 - 1;
         }
-        let body = &page[start..(start + cb).min(512)];
+        let body = page.get(start..(start + cb).min(page.len())).unwrap_or(&[]);
         let istd = u16_at(body, 0);
         entries.push(body.get(2..).map(|b| b.to_vec()).unwrap_or_default());
         istds.push(istd);
@@ -729,6 +731,8 @@ struct Reader<'a> {
     chpx_fkps: Vec<(u32, u32, Fkp)>,
     papx_fkps: Vec<(u32, u32, Fkp)>,
     counters: std::cell::RefCell<HashMap<u32, Vec<i64>>>,
+    extracted: std::cell::Cell<usize>,
+    image_bytes: std::cell::Cell<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -745,7 +749,11 @@ impl Reader<'_> {
 
     fn text(&self, start: u32, end: u32) -> Vec<Char> {
         let mut out = Vec::new();
+        let budget = self.file.word.len().saturating_mul(4);
         for piece in self.pieces {
+            if self.extracted.get() + out.len() > budget {
+                break;
+            }
             if piece.cp_end <= start || piece.cp_start >= end {
                 continue;
             }
@@ -780,6 +788,7 @@ impl Reader<'_> {
                 }
             }
         }
+        self.extracted.set(self.extracted.get() + out.len());
         out
     }
 
@@ -1209,9 +1218,9 @@ impl Reader<'_> {
         let values = counters.entry(lsid).or_insert_with(|| vec![0; 9]);
         let ilvl = ilvl.min(8) as usize;
         if values[ilvl] == 0 {
-            values[ilvl] = level.start - 1;
+            values[ilvl] = i64::from(level.start).saturating_sub(1);
         }
-        values[ilvl] += 1;
+        values[ilvl] = values[ilvl].saturating_add(1);
         for deeper in ilvl + 1..9 {
             values[deeper] = 0;
         }
@@ -1258,6 +1267,10 @@ impl Reader<'_> {
         }
         let body = data.get(at + cb_header..(at + lcb).min(data.len()))?;
         let content = find_blip(body)
+            .filter(|bytes| {
+                self.image_bytes.set(self.image_bytes.get() + bytes.len());
+                self.image_bytes.get() <= crate::limits::MAX_IMAGE_BYTES
+            })
             .and_then(|bytes| ImageFormat::sniff(bytes).map(|format| ImageData { data: bytes.to_vec(), format }))
             .map(DrawingContent::Image)
             .unwrap_or(DrawingContent::Placeholder(None));

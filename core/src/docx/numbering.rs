@@ -147,18 +147,18 @@ impl Counters {
         let values = self
             .values
             .entry(key)
-            .or_insert_with(|| all.iter().map(|l| l.start - 1).collect());
+            .or_insert_with(|| all.iter().map(|l| l.start.saturating_sub(1)).collect());
 
         let first_use = self.started.insert((num_id.to_string(), ilvl));
         if first_use {
             if let Some(start) = instance.overrides.get(&ilvl).and_then(|o| o.start) {
-                values[ilvl] = start - 1;
+                values[ilvl] = start.saturating_sub(1);
             }
         }
 
-        values[ilvl] += 1;
+        values[ilvl] = values[ilvl].saturating_add(1);
         for deeper in ilvl + 1..values.len() {
-            values[deeper] = all[deeper].start - 1;
+            values[deeper] = all[deeper].start.saturating_sub(1);
         }
 
         let text = if level.format == "bullet" {
@@ -203,6 +203,10 @@ fn bullet_text(text: &str) -> String {
 }
 
 pub fn format_number(value: i64, format: &str) -> String {
+    let format = match format {
+        "lowerLetter" | "upperLetter" | "lowerRoman" | "upperRoman" if value > crate::limits::MAX_LIST_VALUE => "decimal",
+        other => other,
+    };
     match format {
         "none" => String::new(),
         "lowerLetter" => letters(value).to_lowercase(),

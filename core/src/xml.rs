@@ -67,7 +67,12 @@ pub fn parse(bytes: &[u8]) -> Result<Element, Error> {
 
     loop {
         match reader.read_event()? {
-            Event::Start(start) => stack.push(element(&start)?),
+            Event::Start(start) => {
+                if stack.len() > crate::limits::MAX_XML_DEPTH {
+                    return Err(Error::new(format!("xml: elements are nested more than {} levels deep", crate::limits::MAX_XML_DEPTH)));
+                }
+                stack.push(element(&start)?)
+            }
             Event::Empty(start) => {
                 let el = element(&start)?;
                 push_child(&mut stack, Node::Element(el));
