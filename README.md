@@ -92,6 +92,33 @@ Return every supported pair as `{ from, to }`.
 
 Path to the bundled fonts directory.
 
+## Limits
+
+Documents are often untrusted, so the engine caps what a small file can make it allocate or
+lay out. A document past a hard limit is rejected with an error. One past a soft limit still
+converts, with the value clamped.
+
+Rejected:
+
+- An archive part larger than 128 MB uncompressed.
+- XML nested more than 512 elements deep.
+- A spreadsheet that would print more than 30,000 cells.
+
+Clamped:
+
+- Table spans: 1–1,000 columns.
+- Text columns: 1–64.
+- Pages: 72–14,400 pt on each side, with margins scaled to fit.
+- Lengths: NaN and infinity become 0; any other length is held within ±1,000,000 pt.
+- List counters: above 32,767, letter and Roman labels fall back to decimal.
+- Charts: up to 100,000 points per series (in .xls, 32,000 per series and 256,000 per chart).
+- Formulas: nesting depth up to 256.
+- Images: more than 50 megapixels, or ones that cannot be decoded, are drawn as blank
+  space.
+- Tables nested more than 12 deep: the inner tables are flattened into paragraphs.
+
+Spreadsheet pages with no content are not printed, as in LibreOffice Calc.
+
 ## Development
 
 The platform packages in `npm/` are npm workspaces, and each declares its own `os` and `cpu`
