@@ -1,12 +1,15 @@
 #include <assert.h>
-#include <bare.h>
+#include <bare/module.h>
 #include <js.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <utf.h>
+
+#ifndef __wasm__
 #include <uv.h>
+#endif
 
 #include "simple_converter.h"
 
@@ -22,6 +25,10 @@ typedef struct {
   int status;
 } simple_converter_job_t;
 
+// WebAssembly addons are single threaded and have no event loop, so they
+// export only convertSync() and leave running it off the JavaScript thread to
+// the embedder.
+#ifndef __wasm__
 typedef struct {
   uv_work_t work;
   js_env_t *env;
@@ -30,6 +37,7 @@ typedef struct {
   bool exiting;
   simple_converter_job_t job;
 } simple_converter_req_t;
+#endif
 
 static bool
 simple_converter__string(js_env_t *env, js_value_t *value, char **result) {
@@ -218,6 +226,7 @@ simple_converter_convert_sync(js_env_t *env, js_callback_info_t *info) {
   return result;
 }
 
+#ifndef __wasm__
 static void
 simple_converter__on_work(uv_work_t *work) {
   simple_converter_req_t *req = (simple_converter_req_t *) work;
@@ -300,6 +309,7 @@ simple_converter_convert(js_env_t *env, js_callback_info_t *info) {
 
   return promise;
 }
+#endif
 
 static js_value_t *
 simple_converter_exports(js_env_t *env, js_value_t *exports) {
@@ -314,7 +324,9 @@ simple_converter_exports(js_env_t *env, js_value_t *exports) {
     assert(err == 0); \
   }
 
+#ifndef __wasm__
   V("convert", simple_converter_convert)
+#endif
   V("convertSync", simple_converter_convert_sync)
 #undef V
 

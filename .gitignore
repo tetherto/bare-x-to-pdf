@@ -7,3 +7,4 @@ bench/out
 npm/*/prebuilds
 package-lock.json
 coverage
+build-wasm

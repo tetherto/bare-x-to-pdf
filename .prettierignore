@@ -6,3 +6,4 @@ bench/corpus/*.md
 npm/*/prebuilds
 coverage
 test/fixtures/hostile
+build-wasm
