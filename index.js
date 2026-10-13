@@ -188,7 +188,11 @@ function optional(value) {
 }
 
 async function convert(input, opts = {}) {
-  return Buffer.from(await binding.convert(...prepare(input, opts)))
+  const args = prepare(input, opts)
+  // The WebAssembly addon has no thread pool, so it converts on the calling
+  // thread; run it in a worker to keep the JavaScript thread free.
+  if (binding.convert === undefined) return Buffer.from(binding.convertSync(...args))
+  return Buffer.from(await binding.convert(...args))
 }
 
 function convertSync(input, opts = {}) {
