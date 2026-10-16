@@ -1,7 +1,6 @@
-const path = require('bare-path')
 const { binding } = require('./binding')
 
-const FONTS_DIR = path.join(__dirname, 'fonts')
+const FONTS_DIR = require.asset('./fonts')
 
 const CONVERSIONS = {
   docx: ['pdf'],

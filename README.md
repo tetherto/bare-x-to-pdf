@@ -90,7 +90,7 @@ Return every supported pair as `{ from, to }`.
 
 ### `FONTS_DIR`
 
-Path to the bundled fonts directory.
+Path to the bundled fonts directory, resolved with `require.asset`.
 
 ## Limits
 
