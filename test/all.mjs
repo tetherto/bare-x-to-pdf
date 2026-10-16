@@ -8,6 +8,7 @@ async function runTests() {
   test.pause()
 
   await test.load(import.meta.resolve('./convert.js'))
+  await test.load(import.meta.resolve('./types.js'))
   await test.load(import.meta.resolve('./hostile.js'))
   await test.load(import.meta.resolve('./wasm.js'))
 
