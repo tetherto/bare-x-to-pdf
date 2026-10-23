@@ -70,9 +70,6 @@
   "publishConfig": {
     "access": "public"
   },
-  "dependencies": {
-    "bare-url": "^2.4.1"
-  },
   "devDependencies": {
     "bare-crypto": "^1.15.4",
     "bare-fs": "^4.0.0",
@@ -88,6 +85,9 @@
   },
   "imports": {
     "#binding": {
+      "wasi": {
+        "wasm32": "bare-x-to-pdf-wasi-wasm32"
+      },
       "android": {
         "arm": "bare-x-to-pdf-android-arm",
         "arm64": "bare-x-to-pdf-android-arm64",

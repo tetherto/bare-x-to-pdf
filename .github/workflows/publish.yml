@@ -44,7 +44,6 @@ jobs:
       - name: Publish to npm
         run: |
           version="$(node -p 'require("./package.json").version')"
-          root="$(node -p 'require("./package.json").name')"
           publish() {
             local dir="$1" name attempt=1
             name="$(node -p "require('./$dir/package.json').name")"
@@ -62,8 +61,8 @@ jobs:
             done
           }
           failed=""
-          for name in $(node -p 'Object.keys(require("./package.json").optionalDependencies).join(" ")'); do
-            dir="npm/${name#"$root"-}"
+          for dir in npm/*/; do
+            dir="${dir%/}"
             if [ -z "$(ls -A "$dir/prebuilds" 2>/dev/null)" ]; then
               echo "::error::$dir has no prebuild"
               failed="$failed $dir"
