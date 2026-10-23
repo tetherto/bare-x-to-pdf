@@ -1,6 +1,6 @@
 {
   "name": "bare-x-to-pdf-wasi-wasm32",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "The WebAssembly (WASI) prebuild of bare-x-to-pdf",
   "exports": {
     "./package": "./package.json",
@@ -12,7 +12,7 @@
   ],
   "addon": true,
   "peerDependencies": {
-    "bare-x-to-pdf": "0.4.0"
+    "bare-x-to-pdf": "0.5.0"
   },
   "peerDependenciesMeta": {
     "bare-x-to-pdf": {
