@@ -58,3 +58,11 @@ corrosion_import_crate(
   CRATE_TYPES staticlib
   PROFILE release
 )
+
+# Corrosion 0.6.1 adds the Command Line Tools SDK as a link directory on macOS.
+# The linker searches it before CMAKE_OSX_SYSROOT, so -lSystem resolves against
+# the wrong SDK and fails when the two differ (corrosion-rs/corrosion#686, fixed
+# upstream after 0.6.1). Drop this once the pin moves past that fix.
+if(APPLE)
+  set_property(TARGET simple_converter_core-static PROPERTY INTERFACE_LINK_DIRECTORIES "")
+endif()
