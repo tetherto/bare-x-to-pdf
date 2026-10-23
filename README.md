@@ -42,6 +42,45 @@ npm install --os=android --cpu=arm64
 npm install --os=ios --cpu=arm64
 ```
 
+### WebAssembly
+
+On Bare 1.36 and later the converter can also run as a WebAssembly addon, sandboxed through
+WASI. It isn't installed by default; add its package next to the main one, at the same
+version:
+
+```sh
+npm install bare-x-to-pdf bare-x-to-pdf-wasi-wasm32
+```
+
+Then import with the `wasi-wasm32` host and a WASI provider. The attributes must be written
+inline in the `require` call. The addon needs a random source and read access to the fonts:
+
+```js
+const converter = require('bare-x-to-pdf', {
+  with: { host: 'wasi-wasm32', wasi: './wasi.js' }
+})
+```
+
+```js
+// wasi.js
+const crypto = require('bare-crypto')
+const { DirectorySync } = require('bare-directory')
+const { HostDirectory } = require('bare-wasi/host')
+
+const fonts = require.resolve('bare-x-to-pdf/package').replace(/package\.json$/, 'fonts')
+
+module.exports = (url) => ({
+  version: 'preview1',
+  random: (b) => crypto.randomFillSync(b),
+  preopens: { [fonts]: new HostDirectory(DirectorySync.open(fonts)) }
+})
+```
+
+The WebAssembly addon has only `convertSync`. `convert()` falls back to it, so it blocks the
+calling thread; run conversions in a [`bare-thread`](https://github.com/holepunchto/bare-thread).
+A hostile document can crash the addon with a `RuntimeError` without taking down the process,
+but the addon stays unusable in that thread afterwards, so replace the thread.
+
 ## Usage
 
 ```js

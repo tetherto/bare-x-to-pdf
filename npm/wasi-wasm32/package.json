@@ -1,0 +1,34 @@
+{
+  "name": "bare-x-to-pdf-wasi-wasm32",
+  "version": "0.4.0",
+  "description": "The WebAssembly (WASI) prebuild of bare-x-to-pdf",
+  "exports": {
+    "./package": "./package.json",
+    ".": "./index.js"
+  },
+  "files": [
+    "index.js",
+    "prebuilds"
+  ],
+  "addon": true,
+  "peerDependencies": {
+    "bare-x-to-pdf": "0.4.0"
+  },
+  "peerDependenciesMeta": {
+    "bare-x-to-pdf": {
+      "optional": true
+    }
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tetherto/bare-x-to-pdf.git"
+  },
+  "bugs": {
+    "url": "https://github.com/tetherto/bare-x-to-pdf/issues"
+  },
+  "homepage": "https://github.com/tetherto/bare-x-to-pdf",
+  "publishConfig": {
+    "access": "public"
+  }
+}
