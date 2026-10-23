@@ -65,12 +65,12 @@
     "access": "public"
   },
   "dependencies": {
-    "bare-path": "^3.0.0",
     "bare-url": "^2.4.1"
   },
   "devDependencies": {
     "bare-crypto": "^1.15.4",
     "bare-fs": "^4.0.0",
+    "bare-path": "^3.0.0",
     "bare-wasi": "^0.1.1",
     "bare-wasm-abi": "^0.1.1",
     "brittle": "^4.1.0",
