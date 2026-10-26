@@ -23,7 +23,7 @@ against the Bare 1.35 headers as published. Loaded through `bare-wasm-abi` on Ba
   The host survives; the addon instance is dead after that (see "Recovering from a trap").
 
 On Bare 1.36, `require('bare-x-to-pdf', { with: { host: 'wasi-wasm32', wasi } })` works end
-to end from a separate `bare-x-to-pdf-wasi-wasm32` package. It needs two package changes
+to end, with the `.wasm` shipped inside the main package. It needs two package changes
 (see "Loading through `require`"). Still open before shipping in Keet: does WebAssembly
 exist on iOS and in lite-mode V8 at all (see "Mobile")?
 
@@ -75,14 +75,17 @@ exist on iOS and in lite-mode V8 at all (see "Mobile")?
   `wasi-sysroot` are global tools rather than devDeps; in CI, `compile-prebuilds` installs
   them with `wasi: true`.
 - `.github/workflows/prebuild.yml`: a `wasi-wasm32` job (Rust target `wasm32-wasip1`,
-  `wasi: true` on `compile-prebuilds`). Its artifact lands in `npm/wasi-wasm32/prebuilds`
-  on publish, but nothing publishes it until that package exists.
+  `wasi: true` on `compile-prebuilds`). On publish, `publish.yml` moves its artifact from
+  `npm/wasi-wasm32/prebuilds` into the main package's `prebuilds`.
 
-- Packaging, as described under "Loading through `require`": a `wasi-wasm32` target in
-  `scripts/platform-packages.js` (first, with no `os`/`cpu`), so `npm/wasi-wasm32` and the
-  first `#binding` key. The wasi package is deliberately not an optional dependency (see
-  the native fallback below). `publish.yml` now publishes every `npm/*` package instead
-  of walking `optionalDependencies`. `index.js` no longer imports
+- Packaging, as described under "Loading through `require`": the main package ships
+  `prebuilds/wasi-wasm32/bare-x-to-pdf.wasm` and `wasi.js`, and
+  `scripts/platform-packages.js` writes the `wasi` key first in `#binding`, pointing at
+  `./wasi.js`. The wasi build keeps the package name (`CMakeLists.txt` drops the
+  `-${target}` suffix for it), because `require.addon()` in the main package looks for
+  `bare-x-to-pdf.wasm`. Native prebuilds stay in their platform packages, about 30 MB
+  each. `publish.yml` publishes every `npm/*` package instead of walking
+  `optionalDependencies`. `index.js` no longer imports
   `bare-path`, which moved to `devDependencies`, and the unused `bare-url` dependency is
   gone, so the package has no runtime dependencies.
 
@@ -112,12 +115,13 @@ With the `wasi` key first, the wasm PDFs were byte-identical to native on the fi
 tried (3 corpus files, 6 hostile ones), and the provider was called once with the addon's
 URL. Two changes were needed for that, and both are made on this branch:
 
-1. **`#binding` gets `"wasi": { "wasm32": "bare-x-to-pdf-wasi-wasm32" }` as its first
-   key**, plus an `npm/wasi-wasm32` package (`scripts/platform-packages.js` writes
-   both). The wasi package must have no
-   `os`/`cpu`: the script writes them from the target, and `os: ['wasi']` would make npm
-   skip the package on every machine. Prettier and other tools that sort
-   keys must leave this order alone.
+1. **`#binding` gets `"wasi": { "wasm32": "./wasi.js" }` as its first key**
+   (`scripts/platform-packages.js` writes it). Under the wasi host, the
+   `require.addon()` in `wasi.js` loads the main package's own
+   `prebuilds/wasi-wasm32/bare-x-to-pdf.wasm`. Prettier and other tools that sort keys
+   must leave this order alone. This was first tested with a separate
+   `bare-x-to-pdf-wasi-wasm32` package, and again on 2026-10-26 with the 0.5.0 `.wasm`
+   inside the main package: same PDF as native, provider called with the addon's URL.
 2. **`index.js` drops `bare-path`.** It's only used for `path.join(__dirname, 'fonts')`,
    but `bare-path` has a native addon (for `cwd()`) with no wasm prebuild, so under the
    wasm host the import fails in `bare-path/binding.js`. Joining with a platform separator
@@ -125,23 +129,18 @@ URL. Two changes were needed for that, and both are made on this branch:
    too. bare-sqlite, the release
    example, has no dependencies at all.
 
-**Native fallback pitfall.** With no host, bare-module tries the native conditions first
-and then `wasi`/`wasm32` as a fallback. If the native package is missing (a platform with
-no prebuild, such as win32-arm64 or android-ia32, or a failed optional install), a plain
-`require('bare-x-to-pdf')` silently loads the wasm addon with no provider, and the first
-conversion traps (`RuntimeError: unreachable`, from the denied `random_get`). Tested by
-removing `bare-x-to-pdf-linux-x64`. The `wasi` package has no `os`/`cpu`, so npm installs
-it everywhere if it's an optional dependency.
+**Native fallback.** With no host, bare-module tries the native conditions first and then
+`wasi`/`wasm32` as a fallback. The `.wasm` is always installed, so if the native package
+is missing (a platform with no prebuild, such as win32-arm64 or android-ia32, or a failed
+optional install), a plain `require('bare-x-to-pdf')` loads the wasm addon with no
+provider, and the first conversion traps (`RuntimeError: unreachable`, from the denied
+`random_get`) instead of the import failing with `ADDON_NOT_FOUND`. Tested on Bare 1.36
+by removing `bare-x-to-pdf-darwin-arm64`. `wasi.js` can't tell the two cases apart:
+`require.addon.host` is the native host either way. bare-sqlite, which ships all its
+prebuilds in one package, behaves the same.
 
-So it isn't one. The two known consumers each use one build: one native, one wasm. The
-native app never has the wasi package, so a missing native prebuild fails at resolve time
-as before. The wasm app depends on `bare-x-to-pdf-wasi-wasm32` itself and imports with the
-host. The wasi package has an exact-version `peerDependencies` on `bare-x-to-pdf`, marked
-optional, so npm refuses a mismatched pair (`ERESOLVE`, tested with 0.3.0 against 0.4.0)
-but doesn't pull `bare-x-to-pdf` from the registry into this checkout's workspaces. The
-wasm app still gets the native prebuild for its host as an optional dependency. That's
-harmless: imports with the host pick the wasi key first. It can skip the native one with
-`npm install --omit=optional`.
+The cost of shipping it in the main package is size: every install gets the 25.8 MB
+`.wasm` (34 MB unpacked and 13 MB packed in total, against 8.4 MB unpacked before).
 
 ## Capabilities the addon needs from Keet's WASI provider
 

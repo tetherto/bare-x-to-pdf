@@ -9,7 +9,11 @@ include(cmake/rust.cmake)
 
 bare_target(target)
 
-add_bare_module(simple_converter NAME bare-x-to-pdf-${target})
+if(target STREQUAL "wasi-wasm32")
+  add_bare_module(simple_converter)
+else()
+  add_bare_module(simple_converter NAME bare-x-to-pdf-${target})
+endif()
 
 target_sources(
   ${simple_converter}
