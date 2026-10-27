@@ -45,14 +45,8 @@ npm install --os=ios --cpu=arm64
 ### WebAssembly
 
 On Bare 1.36 and later the converter can also run as a WebAssembly addon, sandboxed through
-WASI. It isn't installed by default; add its package next to the main one, at the same
-version:
-
-```sh
-npm install bare-x-to-pdf bare-x-to-pdf-wasi-wasm32
-```
-
-Then import with the `wasi-wasm32` host and a WASI provider. The attributes must be written
+WASI. The `.wasm` prebuild ships in the main package, so there is nothing extra to install.
+Import with the `wasi-wasm32` host and a WASI provider. The attributes must be written
 inline in the `require` call. The addon needs a random source and read access to the fonts:
 
 ```js

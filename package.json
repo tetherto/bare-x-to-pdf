@@ -25,6 +25,8 @@
     "types.d.ts",
     "binding.c",
     "binding.js",
+    "wasi.js",
+    "prebuilds/wasi-wasm32",
     "CMakeLists.txt",
     "cmake",
     "core/Cargo.toml",
@@ -86,7 +88,7 @@
   "imports": {
     "#binding": {
       "wasi": {
-        "wasm32": "bare-x-to-pdf-wasi-wasm32"
+        "wasm32": "./wasi.js"
       },
       "android": {
         "arm": "bare-x-to-pdf-android-arm",

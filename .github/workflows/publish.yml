@@ -24,6 +24,7 @@ jobs:
       - uses: holepunchto/actions/download-prebuilds@v1
         with:
           prefix: npm
+      - run: mv npm/wasi-wasm32/prebuilds prebuilds && rmdir npm/wasi-wasm32
       - run: npm install --global npm@^11.5.1
       - id: disttag
         run: |
