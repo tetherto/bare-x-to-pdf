@@ -1,6 +1,6 @@
 {
   "name": "bare-x-to-pdf-ios-arm64",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "The iOS ARM 64-bit prebuild of bare-x-to-pdf",
   "exports": {
     "./package": "./package.json",
