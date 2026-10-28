@@ -2,31 +2,38 @@ const { binding } = require('./binding')
 
 const FONTS_DIR = require.asset('./fonts')
 
+const TARGETS = ['pdf', 'png']
+
 const CONVERSIONS = {
-  docx: ['pdf'],
-  docm: ['pdf'],
-  dotx: ['pdf'],
-  dotm: ['pdf'],
-  doc: ['pdf'],
-  dot: ['pdf'],
-  odt: ['pdf'],
-  ott: ['pdf'],
-  fodt: ['pdf'],
-  ods: ['pdf'],
-  ots: ['pdf'],
-  fods: ['pdf'],
-  odp: ['pdf'],
-  otp: ['pdf'],
-  fodp: ['pdf'],
-  pptx: ['pdf'],
-  xlsx: ['pdf'],
-  xlsm: ['pdf'],
-  xltx: ['pdf'],
-  xltm: ['pdf'],
-  xls: ['pdf'],
-  xlt: ['pdf'],
-  md: ['pdf'],
-  markdown: ['pdf']
+  docx: TARGETS,
+  docm: TARGETS,
+  dotx: TARGETS,
+  dotm: TARGETS,
+  doc: TARGETS,
+  dot: TARGETS,
+  odt: TARGETS,
+  ott: TARGETS,
+  fodt: TARGETS,
+  ods: TARGETS,
+  ots: TARGETS,
+  fods: TARGETS,
+  odp: TARGETS,
+  otp: TARGETS,
+  fodp: TARGETS,
+  pptx: TARGETS,
+  pptm: TARGETS,
+  potx: TARGETS,
+  potm: TARGETS,
+  ppsx: TARGETS,
+  ppsm: TARGETS,
+  xlsx: TARGETS,
+  xlsm: TARGETS,
+  xltx: TARGETS,
+  xltm: TARGETS,
+  xls: TARGETS,
+  xlt: TARGETS,
+  md: TARGETS,
+  markdown: TARGETS
 }
 
 const ODF_MIMETYPES = [
@@ -179,7 +186,49 @@ function prepare(input, opts) {
     throw new Error(`convert: ${from} to ${to} is not supported`)
   }
 
-  return [bytes, from, to, opts.fontsDir || FONTS_DIR]
+  const args = [bytes, from, to, opts.fontsDir || FONTS_DIR]
+  const request = requestOf(opts, to)
+  if (request !== null) args.push(request)
+  return args
+}
+
+function requestOf(opts, to) {
+  const parts = []
+  if (opts.map !== undefined && opts.map !== null && typeof opts.map !== 'boolean') {
+    throw new TypeError('convert: opts.map must be a boolean')
+  }
+  if (opts.map) parts.push('map=1')
+  if (opts.pages !== undefined && opts.pages !== null) {
+    const valid =
+      Array.isArray(opts.pages) && opts.pages.every((p) => Number.isInteger(p) && p >= 0)
+    if (!valid) throw new TypeError('convert: opts.pages must be an array of page indexes from 0')
+    if (opts.pages.length > 0) parts.push('pages=' + opts.pages.join(','))
+  }
+  if (opts.scale !== undefined && opts.scale !== null) {
+    if (typeof opts.scale !== 'number' || !(opts.scale > 0)) {
+      throw new TypeError('convert: opts.scale must be a positive number')
+    }
+    if (to !== 'png') throw new TypeError('convert: opts.scale applies only to png output')
+    parts.push('scale=' + opts.scale)
+  }
+  if (parts.length === 0 && to === 'pdf') return null
+  return parts.join(';')
+}
+
+function finish(result, to) {
+  if (!Array.isArray(result)) return Buffer.from(result)
+  const [data, json] = result
+  const meta = JSON.parse(json)
+  const bytes = Buffer.from(data)
+  const files = []
+  let at = 0
+  for (const size of meta.sizes) {
+    files.push(bytes.subarray(at, at + size))
+    at += size
+  }
+  const output = to === 'png' ? files : files[0]
+  if (meta.map === null) return output
+  return to === 'png' ? { png: output, map: meta.map } : { pdf: output, map: meta.map }
 }
 
 function optional(value) {
@@ -188,14 +237,16 @@ function optional(value) {
 
 async function convert(input, opts = {}) {
   const args = prepare(input, opts)
+  const to = args[2]
   // The WebAssembly addon has no thread pool, so it converts on the calling
   // thread; run it in a worker to keep the JavaScript thread free.
-  if (binding.convert === undefined) return Buffer.from(binding.convertSync(...args))
-  return Buffer.from(await binding.convert(...args))
+  if (binding.convert === undefined) return finish(binding.convertSync(...args), to)
+  return finish(await binding.convert(...args), to)
 }
 
 function convertSync(input, opts = {}) {
-  return Buffer.from(binding.convertSync(...prepare(input, opts)))
+  const args = prepare(input, opts)
+  return finish(binding.convertSync(...args), args[2])
 }
 
 function supports(from, to) {

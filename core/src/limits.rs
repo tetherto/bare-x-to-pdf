@@ -19,6 +19,8 @@ pub const MAX_SHEET_CELLS: u64 = 30_000;
 pub const MIN_PAGE_SIDE: f64 = 72.0;
 pub const MAX_PAGE_SIDE: f64 = 14_400.0;
 pub const MAX_LENGTH: f64 = 1_000_000.0;
+pub const MAX_PNG_SCALE: f64 = 8.0;
+pub const MAX_PNG_PIXELS: f64 = 64_000_000.0;
 
 pub fn span(value: usize) -> usize {
     value.clamp(1, MAX_TABLE_SPAN)

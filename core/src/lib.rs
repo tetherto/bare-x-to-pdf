@@ -21,7 +21,65 @@ pub struct Options<'a> {
     pub fonts_dir: &'a Path,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct Request {
+    pub map: bool,
+    pub pages: Vec<usize>,
+    pub scale: Option<f64>,
+}
+
+impl Request {
+    pub fn parse(spec: &str) -> Result<Request, Error> {
+        let mut request = Request::default();
+        for pair in spec.split(';').filter(|p| !p.is_empty()) {
+            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+            match key {
+                "map" => request.map = value == "1",
+                "pages" => {
+                    request.pages = value
+                        .split(',')
+                        .filter(|v| !v.is_empty())
+                        .map(|v| v.parse().map_err(|_| Error::new(format!("pages must list page indexes, got {v}"))))
+                        .collect::<Result<_, _>>()?
+                }
+                "scale" => {
+                    let scale: f64 = value.parse().map_err(|_| Error::new(format!("scale must be a number, got {value}")))?;
+                    if !(scale.is_finite() && scale > 0.0 && scale <= limits::MAX_PNG_SCALE) {
+                        return Err(Error::new(format!("scale must be above 0 and at most {}", limits::MAX_PNG_SCALE)));
+                    }
+                    request.scale = Some(scale);
+                }
+                _ => return Err(Error::new(format!("unknown option {key}"))),
+            }
+        }
+        Ok(request)
+    }
+}
+
+pub struct Output {
+    pub files: Vec<Vec<u8>>,
+    pub map: Option<String>,
+}
+
 pub fn convert(input: &[u8], from: &str, to: &str, options: &Options) -> Result<Vec<u8>, Error> {
+    let mut output = convert_with(input, from, to, options, &Request::default())?;
+    Ok(output.files.pop().unwrap_or_default())
+}
+
+pub fn convert_with(input: &[u8], from: &str, to: &str, options: &Options, request: &Request) -> Result<Output, Error> {
+    let format = match to {
+        "pdf" => typst_backend::Format::Pdf,
+        "png" => typst_backend::Format::Png,
+        _ => return Err(Error::new(format!("conversion from {from} to {to} is not supported"))),
+    };
+    let document = read(input, from).map_err(|e| match e {
+        Some(e) => e,
+        None => Error::new(format!("conversion from {from} to {to} is not supported")),
+    })?;
+    typst_backend::render(document, options.fonts_dir, request, format)
+}
+
+fn read(input: &[u8], from: &str) -> Result<model::Document, Option<Error>> {
     let compound = input.starts_with(&[0xD0, 0xCF, 0x11, 0xE0]).then(|| compound_kind(input)).flatten();
     let from = match from {
         "doc" | "dot" if input.starts_with(b"PK") => "docx",
@@ -32,44 +90,25 @@ pub fn convert(input: &[u8], from: &str, to: &str, options: &Options) -> Result<
         "odt" | "ott" if input.starts_with(b"<") || input.starts_with(&[0xEF, 0xBB, 0xBF]) => "fodt",
         other => other,
     };
-    match (from, to) {
-        ("docx" | "docm" | "dotx" | "dotm", "pdf") => {
-            let document = docx::read(input)?;
-            typst_backend::render_pdf(document, options.fonts_dir)
-        }
-        ("doc" | "dot", "pdf") => {
-            let document = doc::read(input)?;
-            typst_backend::render_pdf(document, options.fonts_dir)
-        }
-        ("odt" | "ott" | "fodt", "pdf") => {
-            let document = odt::read(input)?;
-            typst_backend::render_pdf(document, options.fonts_dir)
-        }
-        ("xlsx" | "xlsm" | "xltx" | "xltm", "pdf") => {
-            let document = xlsx::read(input)?;
-            typst_backend::render_pdf(document, options.fonts_dir)
-        }
-        ("odp" | "otp" | "fodp", "pdf") => {
-            let document = odt::read_odp(input)?;
-            typst_backend::render_pdf(document, options.fonts_dir)
-        }
-        ("ods" | "ots" | "fods", "pdf") => {
-            let document = xlsx::read_ods(input)?;
-            typst_backend::render_pdf(document, options.fonts_dir)
-        }
-        ("xls" | "xlt", "pdf") => {
-            let document = xlsx::read_xls(input)?;
-            typst_backend::render_pdf(document, options.fonts_dir)
-        }
-        ("md" | "markdown", "pdf") => {
-            let document = markdown::read(input)?;
-            typst_backend::render_pdf(document, options.fonts_dir)
-        }
-        ("pptx", "pdf") => {
-            let document = pptx::read(input)?;
-            typst_backend::render_pdf(document, options.fonts_dir)
-        }
-        _ => Err(Error::new(format!("conversion from {from} to {to} is not supported"))),
+    let document = match from {
+        "docx" | "docm" | "dotx" | "dotm" => docx::read(input),
+        "doc" | "dot" => doc::read(input),
+        "odt" | "ott" | "fodt" => odt::read(input),
+        "xlsx" | "xlsm" | "xltx" | "xltm" => xlsx::read(input),
+        "odp" | "otp" | "fodp" => odt::read_odp(input),
+        "ods" | "ots" | "fods" => xlsx::read_ods(input),
+        "xls" | "xlt" => xlsx::read_xls(input),
+        "md" | "markdown" => markdown::read(input),
+        "pptx" | "pptm" | "potx" | "potm" | "ppsx" | "ppsm" => pptx::read(input),
+        _ => return Err(None),
+    };
+    document.map_err(Some)
+}
+
+impl Output {
+    fn meta(&self) -> String {
+        let sizes: Vec<String> = self.files.iter().map(|f| f.len().to_string()).collect();
+        format!("{{\"sizes\":[{}],\"map\":{}}}", sizes.join(","), self.map.as_deref().unwrap_or("null"))
     }
 }
 
@@ -126,11 +165,30 @@ pub unsafe extern "C" fn sc_convert(
     out: *mut Buffer,
     error: *mut Buffer,
 ) -> i32 {
+    sc_convert_with(input, input_len, from, to, fonts_dir, std::ptr::null(), out, std::ptr::null_mut(), error)
+}
+
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn sc_convert_with(
+    input: *const u8,
+    input_len: usize,
+    from: *const c_char,
+    to: *const c_char,
+    fonts_dir: *const c_char,
+    request: *const c_char,
+    out: *mut Buffer,
+    meta: *mut Buffer,
+    error: *mut Buffer,
+) -> i32 {
     if out.is_null() || error.is_null() {
         return 3;
     }
     *out = Buffer::empty();
     *error = Buffer::empty();
+    if !meta.is_null() {
+        *meta = Buffer::empty();
+    }
 
     static QUIET_PANICS: std::sync::Once = std::sync::Once::new();
     QUIET_PANICS.call_once(|| panic::set_hook(Box::new(|_| {})));
@@ -147,12 +205,16 @@ pub unsafe extern "C" fn sc_convert(
         let options = Options {
             fonts_dir: Path::new(&fonts_dir),
         };
-        convert(input, &from, &to, &options)
+        let request = if request.is_null() { Request::default() } else { Request::parse(&c_string(request, "options")?)? };
+        convert_with(input, &from, &to, &options, &request)
     }));
 
     match result {
-        Ok(Ok(bytes)) => {
-            *out = Buffer::from_vec(bytes);
+        Ok(Ok(output)) => {
+            if !meta.is_null() {
+                *meta = Buffer::from_vec(output.meta().into_bytes());
+            }
+            *out = Buffer::from_vec(output.files.concat());
             0
         }
         Ok(Err(e)) => {

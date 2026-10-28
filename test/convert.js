@@ -30,34 +30,41 @@ test('lists supported conversions', (t) => {
   t.ok(converter.supports('docx', 'pdf'))
   t.ok(converter.supports('.DOCX', 'PDF'))
   t.absent(converter.supports('pdf', 'pdf'))
+  t.ok(converter.supports('potx', 'png'))
+  const formats = [
+    'docx',
+    'docm',
+    'dotx',
+    'dotm',
+    'doc',
+    'dot',
+    'odt',
+    'ott',
+    'fodt',
+    'ods',
+    'ots',
+    'fods',
+    'odp',
+    'otp',
+    'fodp',
+    'pptx',
+    'pptm',
+    'potx',
+    'potm',
+    'ppsx',
+    'ppsm',
+    'xlsx',
+    'xlsm',
+    'xltx',
+    'xltm',
+    'xls',
+    'xlt',
+    'md',
+    'markdown'
+  ]
   t.alike(
     converter.conversions().map((c) => `${c.from}>${c.to}`),
-    [
-      'docx>pdf',
-      'docm>pdf',
-      'dotx>pdf',
-      'dotm>pdf',
-      'doc>pdf',
-      'dot>pdf',
-      'odt>pdf',
-      'ott>pdf',
-      'fodt>pdf',
-      'ods>pdf',
-      'ots>pdf',
-      'fods>pdf',
-      'odp>pdf',
-      'otp>pdf',
-      'fodp>pdf',
-      'pptx>pdf',
-      'xlsx>pdf',
-      'xlsm>pdf',
-      'xltx>pdf',
-      'xltm>pdf',
-      'xls>pdf',
-      'xlt>pdf',
-      'md>pdf',
-      'markdown>pdf'
-    ]
+    formats.flatMap((f) => [`${f}>pdf`, `${f}>png`])
   )
 })
 
@@ -180,4 +187,50 @@ test('convertSync converts on the calling thread and throws on failure', (t) => 
   t.is(pdf.header, '%PDF-')
   t.exception(() => converter.convertSync(Buffer.from('nope'), { to: 'pdf' }), /could not detect/)
   t.exception(() => converter.convertSync(Buffer.from('PK\x03\x04garbage'), { to: 'pdf' }))
+})
+
+test('returns a layout map next to the same pdf bytes', async (t) => {
+  const input = fixture('office-features.docx')
+  const plain = await converter.convert(input, { to: 'pdf' })
+  const { pdf, map } = await converter.convert(input, { to: 'pdf', map: true })
+  t.alike(pdf, plain)
+  t.is(map.version, 1)
+  t.alike(map.pages, [{ width: 792, height: 612 }])
+  const first = map.items.find((i) => i.kind === 'paragraph' && i.ref.part === 'body')
+  t.is(first.ref.block, 0)
+  t.ok(/^[0-9A-F]{8}$/.test(first.ref.id))
+  t.ok(first.box.width > 0 && first.box.height > 0)
+  t.ok(map.items.some((i) => i.kind === 'run' && i.text.end > i.text.start))
+  const sync = converter.convertSync(input, { to: 'pdf', map: true })
+  t.alike(sync.map, map)
+})
+
+test('renders selected pages to pdf and png', async (t) => {
+  const deck = fs.readFileSync(path.join(__dirname, '..', 'bench', 'corpus', 'sdk-sample.pptx'))
+  t.is(inspect(await converter.convert(deck, { to: 'pdf', pages: [2] })).pageCount, 1)
+  const images = await converter.convert(deck, { to: 'png', pages: [3, 0], scale: 0.5 })
+  t.is(images.length, 2)
+  for (const png of images) {
+    t.is(png.subarray(1, 4).toString(), 'PNG')
+    t.is(png.readUInt32BE(16), 360)
+  }
+  const { png, map } = await converter.convert(deck, { to: 'png', pages: [1], map: true })
+  t.is(png.length, 1)
+  t.is(map.pages.length, 4)
+  t.ok(map.items.every((i) => i.page === 1))
+  t.ok(map.items.some((i) => i.kind === 'slide' && i.ref.slide === 1))
+  await t.exception(converter.convert(deck, { to: 'pdf', pages: [4] }), /out of range/)
+  await t.exception.all(converter.convert(deck, { to: 'pdf', pages: [-1] }), /pages/)
+  await t.exception.all(converter.convert(deck, { to: 'pdf', scale: 2 }), /scale/)
+  await t.exception.all(converter.convert(deck, { to: 'pdf', map: 'yes' }), /map/)
+})
+
+test('maps printed spreadsheet cells to their A1 refs', async (t) => {
+  const { map } = await converter.convert(fixture('office-uncached-formulas.xlsx'), {
+    to: 'pdf',
+    map: true
+  })
+  const cells = map.items.filter((i) => i.kind === 'sheetCell').map((i) => i.ref.cell)
+  t.ok(cells.includes('A1'))
+  t.ok(map.items.some((i) => i.kind === 'line' && i.ref.cell === 'D6'))
 })

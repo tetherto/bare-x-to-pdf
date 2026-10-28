@@ -276,10 +276,13 @@ fn paragraph(p: &Element, ctx: &TextContext, counters: &mut HashMap<usize, i64>)
     };
 
     let mut inlines = Vec::new();
+    let mut offsets = Vec::new();
+    let mut offset = 0u32;
     let mut last_props = base.clone();
     for child in p.elements() {
         match child.name.as_str() {
             "r" | "fld" => {
+                let cached = child.child("t").map(|t| t.text()).unwrap_or_default();
                 let mut props = base.clone();
                 if let Some(rpr) = child.child("rPr") {
                     props.merge(&parse_rpr(rpr, ctx.theme, ctx.colors));
@@ -293,9 +296,15 @@ fn paragraph(p: &Element, ctx: &TextContext, counters: &mut HashMap<usize, i64>)
                 last_props = props.clone();
                 if !text.is_empty() {
                     inlines.push(Inline::Text { text, props });
+                    offsets.push(offset);
                 }
+                offset += cached.encode_utf16().count() as u32;
             }
-            "br" => inlines.push(Inline::LineBreak),
+            "br" => {
+                inlines.push(Inline::LineBreak);
+                offsets.push(offset);
+                offset += 1;
+            }
             _ => {}
         }
     }
@@ -372,6 +381,8 @@ fn paragraph(p: &Element, ctx: &TextContext, counters: &mut HashMap<usize, i64>)
         inlines,
         anchors: Vec::new(),
         list,
+        offsets,
+        ..Paragraph::default()
     }
 }
 
