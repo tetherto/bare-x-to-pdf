@@ -1,6 +1,6 @@
 {
   "name": "bare-x-to-pdf-android-x64",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "The Android x86 64-bit prebuild of bare-x-to-pdf",
   "exports": {
     "./package": "./package.json",

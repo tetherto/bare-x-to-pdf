@@ -1,6 +1,6 @@
 {
   "name": "bare-x-to-pdf-linux-arm64",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "The Linux ARM 64-bit prebuild of bare-x-to-pdf",
   "exports": {
     "./package": "./package.json",

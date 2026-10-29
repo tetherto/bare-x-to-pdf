@@ -1,6 +1,6 @@
 {
   "name": "bare-x-to-pdf-android-arm",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "The Android ARM 32-bit prebuild of bare-x-to-pdf",
   "exports": {
     "./package": "./package.json",
