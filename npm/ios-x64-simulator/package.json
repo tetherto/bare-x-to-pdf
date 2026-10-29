@@ -1,6 +1,6 @@
 {
   "name": "bare-x-to-pdf-ios-x64-simulator",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "The iOS x86 simulator 64-bit prebuild of bare-x-to-pdf",
   "exports": {
     "./package": "./package.json",
