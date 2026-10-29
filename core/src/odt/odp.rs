@@ -62,7 +62,7 @@ pub fn read(bytes: &[u8]) -> Result<Document, Error> {
         next_key: std::cell::Cell::new(0),
     };
     let slides = Slides { reader: &reader, styles: &styles, pkg: &pkg };
-    let mut doc = Document { default_tab: styles.default_tab, fixed_line_metrics: true, ..Document::default() };
+    let mut doc = Document { default_tab: styles.default_tab, fixed_line_metrics: true, page_per_section: true, ..Document::default() };
     for page in presentation.children("page") {
         doc.sections.push(slides.page(page));
     }

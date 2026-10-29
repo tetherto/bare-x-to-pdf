@@ -1,26 +1,26 @@
 # bare-x-to-pdf
 
-Convert office documents to PDF for [Bare](https://github.com/holepunchto/bare).
+Convert office documents to PDF or PNG for [Bare](https://github.com/holepunchto/bare).
 A native addon with a Rust engine that lays pages out with
 [Typst](https://typst.app).
 
-`x` is every format it reads into a PDF today:
+`x` is every format it reads today:
 
-| Family                    | Extensions                         |
-| ------------------------- | ---------------------------------- |
-| Word                      | `.docx`, `.docm`, `.dotx`, `.dotm` |
-| Word 97–2003              | `.doc`, `.dot`                     |
-| Excel                     | `.xlsx`, `.xlsm`, `.xltx`, `.xltm` |
-| Excel 97–2003             | `.xls`, `.xlt`                     |
-| PowerPoint                | `.pptx`                            |
-| OpenDocument Text         | `.odt`, `.ott`, `.fodt`            |
-| OpenDocument Spreadsheet  | `.ods`, `.ots`, `.fods`            |
-| OpenDocument Presentation | `.odp`, `.otp`, `.fodp`            |
-| Markdown                  | `.md`, `.markdown`                 |
+| Family                    | Extensions                                           |
+| ------------------------- | ---------------------------------------------------- |
+| Word                      | `.docx`, `.docm`, `.dotx`, `.dotm`                   |
+| Word 97–2003              | `.doc`, `.dot`                                       |
+| Excel                     | `.xlsx`, `.xlsm`, `.xltx`, `.xltm`                   |
+| Excel 97–2003             | `.xls`, `.xlt`                                       |
+| PowerPoint                | `.pptx`, `.pptm`, `.potx`, `.potm`, `.ppsx`, `.ppsm` |
+| OpenDocument Text         | `.odt`, `.ott`, `.fodt`                              |
+| OpenDocument Spreadsheet  | `.ods`, `.ots`, `.fods`                              |
+| OpenDocument Presentation | `.odp`, `.otp`, `.fodp`                              |
+| Markdown                  | `.md`, `.markdown`                                   |
 
-The `from` name for each is the extension without its dot, and PDF is the only output.
-Markdown is CommonMark plus GitHub tables, task lists and strikethrough. Legacy
-PowerPoint (`.ppt`), `.pptm`, `.potx`, `.ppsx`, Rich Text and HTML are not read.
+The `from` name for each is the extension without its dot. Every format converts to PDF
+and to PNG page images. Markdown is CommonMark plus GitHub tables, task lists and
+strikethrough. Legacy PowerPoint (`.ppt`), Rich Text and HTML are not read.
 
 ## Install
 
@@ -95,11 +95,19 @@ Convert `input` off the JavaScript thread and resolve with a `Buffer`. The input
 so it may be changed or transferred once the call returns. Invalid options and conversion
 errors reject the promise.
 
-- `options.to` — target format, `'pdf'`. Required.
+- `options.to` — target format, `'pdf'` or `'png'`. Required. With `'png'` the result is an
+  array with one PNG `Buffer` per page.
 - `options.from` — source format; sniffed from the bytes when omitted. Markdown has no
   signature to sniff, so pass `from: 'md'` for it. Markdown images load only from `data:`
   URIs, since the input is bytes with no directory to resolve relative paths against.
 - `options.fontsDir` — a directory of fonts to use instead of the bundled set.
+- `options.pages` — an array of page indexes, from 0, to output instead of every page. The
+  PDF holds them in document order; PNG images come in the order given. Slides that are not
+  listed are not laid out at all, so asking for one slide of a large deck is fast; Word,
+  Excel and Markdown documents are laid out in full and only the listed pages are exported.
+- `options.scale` — pixels per PDF point for PNG output, `1` (72 dpi) by default.
+- `options.map` — `true` to also return the [layout map](#layout-map). The result is then
+  `{ pdf, map }` or `{ png, map }`. The PDF bytes are the same as without the map.
 
 ### `const pdf = convertSync(input, options)`
 
@@ -124,6 +132,46 @@ Return every supported pair as `{ from, to }`.
 ### `FONTS_DIR`
 
 Path to the bundled fonts directory, resolved with `require.asset`.
+
+## Layout map
+
+With `map: true` the converter reports where every paragraph, line, run, table, cell, image,
+chart, shape and slide landed:
+
+```js
+const { pdf, map } = await converter.convert(docxBytes, { to: 'pdf', map: true })
+// map = { version: 1, pages: [{ width, height }], items: [{ page, kind, ref, box, text? }] }
+```
+
+- `page` counts from 0 and always refers to the page in the whole document, also when
+  `pages` selects only some of them. `pages` lists every page of the document.
+- `box` is `{ x, y, width, height }` in PDF points, with the **origin at the top-left corner
+  of the page as displayed** and y growing downwards. PDF and PDFium use a bottom-left origin;
+  convert with `pdfY = page.height - y - height`.
+- `kind` is `'paragraph'`, `'line'`, `'run'`, `'table'`, `'cell'`, `'image'`, `'chart'`,
+  `'shape'`, `'slide'` or `'sheetCell'`. An element split across pages or columns has one
+  item per fragment, and a header or footer has one per page it is printed on.
+- `text` is `{ start, end }` for lines and runs: offsets into the paragraph's plain text, in
+  UTF-16 code units, counting tabs and line breaks as one character each and leaving out
+  field codes, as `@qvac/office` reads it. An empty paragraph has a line with `start === end`.
+- `ref` names the element with the ids `@qvac/office` uses:
+  - Word: `{ part: 'body', block, id? }` where `block` is the index of the `w:p`, `w:tbl` or
+    `w:sdt` among the children of `w:body` and `id` is the paragraph's `w14:paraId`
+    (for a table, its first paragraph's). Table cells add `row` and `column` (the `w:tr` and
+    `w:tc` positions), and paragraphs in a cell or content control add `paragraph`. Headers
+    and footers are `{ part: 'header' | 'footer', type: 'default' | 'first' | 'even',
+paragraph }`, notes `{ part: 'footnote' | 'endnote', id }`, and images, charts and
+    shapes add `docPr` to the ref of the paragraph that holds them.
+  - PowerPoint: `{ slide, slideId, shape?, paragraph? }` with `slide` the index in
+    `p:sldIdLst`, `slideId` its `p:sldId/@id` and `shape` the `p:cNvPr/@id`. Table cells add
+    `row` and `column`. Shapes drawn from the layout or master add `inherited: true` and carry
+    the layout's shape id. Groups and empty placeholders have a `shape` item too.
+  - Excel: `{ sheet, cell: 'B4' }` for every printed cell (`kind: 'sheetCell'`) and its text,
+    and `{ sheet, chart }` for charts, where `chart` is the index of the anchor in the drawing
+    part.
+
+Formats without an id scheme of their own (`.doc`, OpenDocument, Markdown) return pages but
+no items.
 
 ## Limits
 

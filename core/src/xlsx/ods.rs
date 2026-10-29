@@ -455,7 +455,7 @@ fn read_table(table: &Element, odf: &OdfStyles, formats: &mut Formats, pkg: &Pac
             h = (y_of(end_row) + get("end-y") - y).max(0.0);
         }
         let Some(content) = frame_content(frame, pkg) else { continue };
-        drawings.push(SheetDrawing { x, y, width: w, height: h, content });
+        drawings.push(SheetDrawing { x, y, width: w, height: h, content, tag: Ref::default() });
         let (mut right_col, mut bottom_row) = (1u32, 1u32);
         let mut acc = 0.0;
         while acc + col_width(right_col) < x + w && right_col < 1024 {
@@ -479,6 +479,8 @@ fn read_table(table: &Element, odf: &OdfStyles, formats: &mut Formats, pkg: &Pac
     let extent = sheet_extent(&formats.styles, &sheet_rows, &specs_pt, DEFAULT_COLUMN, 1.0, max_row, max_col, print_area);
     let page = page_options(table, odf, formats, sheet_name);
     Ok(Sheet {
+        scales: Vec::new(),
+        tables: Vec::new(),
         notes,
         conditional: Vec::new(),
         drawings,

@@ -95,7 +95,8 @@ pub fn read(bytes: &[u8]) -> Result<Document, Error> {
         let Some(data) = entry(&mut archive, path)? else { continue };
         let root = xml::parse(&data)?;
         let name = sheet.attr("name").unwrap_or("Sheet").to_string();
-        let mut parsed = parse_sheet(&root, &styles, &shared, print_areas.get(&index).map(String::as_str));
+        let mut parsed = parse_sheet(&root, &styles, &shared, print_areas.get(&index).map(String::as_str), &theme);
+        parsed.tables = read_tables(&mut archive, path, &theme)?;
         auto_row_heights(&mut parsed, &styles);
         parsed.drawings = read_drawings(&mut archive, path, &parsed, &theme)?;
         parsed.notes = read_comments(&mut archive, path)?;
@@ -158,6 +159,7 @@ fn workbook_document(mut doc: Document, parsed_sheets: &[(String, Sheet)], style
                 inlines: Vec::new(),
                 anchors: Vec::new(),
                 list: None,
+                ..Paragraph::default()
             })],
             columns: 1,
             content_scale: 1.0,
@@ -240,7 +242,7 @@ fn read_drawings<R: Read + std::io::Seek>(
                 }
             }
         }
-        for anchor in root.elements() {
+        for (index, anchor) in root.elements().enumerate() {
             let num = |el: &Element, name: &str| el.child(name).and_then(|c| c.text().trim().parse::<u32>().ok()).unwrap_or(0);
             let off = |el: &Element, name: &str| el.child(name).and_then(|c| emu(c.text().trim())).unwrap_or(0.0);
             let (x, y) = match (anchor.child("from"), anchor.child("pos")) {
@@ -263,6 +265,7 @@ fn read_drawings<R: Read + std::io::Seek>(
                 continue;
             }
             let Some(shape) = anchor.elements().find(|e| matches!(e.name.as_str(), "sp" | "pic" | "cxnSp" | "graphicFrame")) else { continue };
+            let tag = Ref::new().int(if shape.name == "graphicFrame" { "chart" } else { "drawing" }, index as i64);
             let content = if shape.name == "graphicFrame" {
                 Some(
                     shape
@@ -278,7 +281,7 @@ fn read_drawings<R: Read + std::io::Seek>(
                 simple_shape(shape, width, height, theme, &media)
             };
             if let Some(content) = content {
-                drawings.push(SheetDrawing { x, y, width, height, content });
+                drawings.push(SheetDrawing { x, y, width, height, content, tag });
             }
         }
     }
@@ -340,11 +343,107 @@ struct CondRule {
 }
 
 fn cell_value(sheet: &Sheet, row: u32, col: u32) -> formula::Value {
-    match sheet.rows.get(&row).and_then(|d| d.cells.get(&col)).map(|c| &c.value) {
+    stored_value(&sheet.rows, row, col)
+}
+
+fn stored_value(rows: &BTreeMap<u32, RowData>, row: u32, col: u32) -> formula::Value {
+    match rows.get(&row).and_then(|d| d.cells.get(&col)).map(|c| &c.value) {
         Some(CellValue::Number(n)) | Some(CellValue::Shown(n, _)) => formula::Value::Num(*n),
         Some(CellValue::Bool(b)) => formula::Value::Bool(*b),
         Some(CellValue::Text(parts)) => formula::Value::Str(parts.iter().map(|(t, _)| t.as_str()).collect()),
         _ => formula::Value::Empty,
+    }
+}
+
+struct Resolver<'a> {
+    rows: &'a BTreeMap<u32, RowData>,
+    formulas: HashMap<(u32, u32), (String, i64, i64)>,
+    memo: std::cell::RefCell<HashMap<(u32, u32), Option<formula::Value>>>,
+    depth: std::cell::Cell<usize>,
+    failed: std::cell::Cell<bool>,
+    last_row: u32,
+    last_col: u32,
+}
+
+impl Resolver<'_> {
+    fn value(&self, row: u32, col: u32) -> formula::Value {
+        let Some((text, row_offset, col_offset)) = self.formulas.get(&(row, col)) else {
+            return stored_value(self.rows, row, col);
+        };
+        if let Some(known) = self.memo.borrow().get(&(row, col)) {
+            return known.clone().unwrap_or_else(|| {
+                self.failed.set(true);
+                formula::Value::Empty
+            });
+        }
+        if self.depth.get() >= crate::limits::MAX_FORMULA_DEPTH {
+            self.failed.set(true);
+            return formula::Value::Empty;
+        }
+        self.memo.borrow_mut().insert((row, col), None);
+        self.depth.set(self.depth.get() + 1);
+        let outer = self.failed.replace(false);
+        let cell = |r: u32, c: u32| self.value(r, c);
+        let ctx = formula::Context {
+            cell: &cell,
+            row_offset: *row_offset,
+            col_offset: *col_offset,
+            last_row: self.last_row,
+            last_col: self.last_col,
+        };
+        let result = formula::evaluate(text, &ctx).filter(|_| !self.failed.get());
+        self.failed.set(outer || result.is_none());
+        self.depth.set(self.depth.get() - 1);
+        self.memo.borrow_mut().insert((row, col), result.clone());
+        result.unwrap_or(formula::Value::Empty)
+    }
+}
+
+fn resolve_formulas(rows: &mut BTreeMap<u32, RowData>, pending: Vec<(u32, u32, String, i64, i64)>, last_row: u32, last_col: u32) {
+    if pending.is_empty() {
+        return;
+    }
+    let results: Vec<((u32, u32), CellValue)> = {
+        let resolver = Resolver {
+            rows,
+            formulas: pending.iter().map(|(r, c, text, ro, co)| ((*r, *c), (text.clone(), *ro, *co))).collect(),
+            memo: Default::default(),
+            depth: Default::default(),
+            failed: Default::default(),
+            last_row,
+            last_col,
+        };
+        pending
+            .iter()
+            .map(|(r, c, text, _, _)| {
+                resolver.failed.set(false);
+                let value = resolver.value(*r, *c);
+                let solved = resolver.memo.borrow().get(&(*r, *c)).cloned().flatten().is_some();
+                let shown = if !solved {
+                    CellValue::Formula(format!("={}", text.trim_start_matches('=')))
+                } else {
+                    match value {
+                        formula::Value::Num(n) if n.is_finite() => CellValue::Number(n),
+                        formula::Value::Bool(b) => CellValue::Bool(b),
+                        formula::Value::Str(s) => CellValue::Text(vec![(s, RunProps::default())]),
+                        formula::Value::Range(items) => match items.into_iter().next() {
+                            Some(formula::Value::Num(n)) if n.is_finite() => CellValue::Number(n),
+                            Some(formula::Value::Str(s)) => CellValue::Text(vec![(s, RunProps::default())]),
+                            Some(formula::Value::Bool(b)) => CellValue::Bool(b),
+                            _ => CellValue::Empty,
+                        },
+                        formula::Value::Num(_) => CellValue::Error("#NUM!".into()),
+                        formula::Value::Empty => CellValue::Number(0.0),
+                    }
+                };
+                ((*r, *c), shown)
+            })
+            .collect()
+    };
+    for ((r, c), value) in results {
+        if let Some(cell) = rows.get_mut(&r).and_then(|d| d.cells.get_mut(&c)) {
+            cell.value = value;
+        }
     }
 }
 
@@ -635,6 +734,7 @@ enum CellValue {
     Text(Vec<(String, RunProps)>),
     Bool(bool),
     Error(String),
+    Formula(String),
 }
 
 #[derive(Debug, Clone)]
@@ -710,9 +810,175 @@ struct SheetDrawing {
     width: f64,
     height: f64,
     content: DrawingContent,
+    tag: Ref,
+}
+
+struct ColorScale {
+    range: (u32, u32, u32, u32),
+    stops: Vec<(String, Option<f64>, Color)>,
+}
+
+impl ColorScale {
+    fn color(&self, sheet: &Sheet, row: u32, col: u32) -> Option<Color> {
+        let (r1, c1, r2, c2) = self.range;
+        if row < r1 || row > r2 || col < c1 || col > c2 || self.stops.len() < 2 {
+            return None;
+        }
+        let number = |r: u32, c: u32| match sheet.rows.get(&r).and_then(|d| d.cells.get(&c)).map(|d| &d.value) {
+            Some(CellValue::Number(n)) | Some(CellValue::Shown(n, _)) => Some(*n),
+            _ => None,
+        };
+        let value = number(row, col)?;
+        let mut values: Vec<f64> = (r1..=r2.min(sheet.last_row)).flat_map(|r| (c1..=c2.min(sheet.last_col)).map(move |c| (r, c))).filter_map(|(r, c)| number(r, c)).collect();
+        values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let (min, max) = (*values.first()?, *values.last()?);
+        let percentile = |p: f64| {
+            let at = (p / 100.0).clamp(0.0, 1.0) * (values.len() - 1) as f64;
+            let low = values[at.floor() as usize];
+            let high = values[at.ceil() as usize];
+            low + (high - low) * at.fract()
+        };
+        let points: Vec<(f64, Color)> = self
+            .stops
+            .iter()
+            .map(|(kind, v, color)| {
+                let at = match (kind.as_str(), v) {
+                    ("min", _) => min,
+                    ("max", _) => max,
+                    ("percent", Some(p)) => min + (max - min) * p / 100.0,
+                    ("percentile", Some(p)) => percentile(*p),
+                    (_, Some(n)) => *n,
+                    _ => min,
+                };
+                (at, *color)
+            })
+            .collect();
+        if value <= points[0].0 {
+            return Some(points[0].1);
+        }
+        for pair in points.windows(2) {
+            let ((a, ca), (b, cb)) = (pair[0], pair[1]);
+            if value <= b {
+                let t = if b > a { (value - a) / (b - a) } else { 1.0 };
+                let mix = |x: u8, y: u8| (x as f64 + (y as f64 - x as f64) * t).round() as u8;
+                return Some(Color(mix(ca.0, cb.0), mix(ca.1, cb.1), mix(ca.2, cb.2)));
+            }
+        }
+        points.last().map(|p| p.1)
+    }
+}
+
+struct SheetTable {
+    range: (u32, u32, u32, u32),
+    header_rows: u32,
+    totals_rows: u32,
+    row_stripes: bool,
+    first_column: bool,
+    family: String,
+    accent: Color,
+}
+
+struct TableLook {
+    fill: Option<Color>,
+    bold: bool,
+    color: Option<Color>,
+    bottom: Option<BorderSide>,
+}
+
+impl SheetTable {
+    fn look(&self, row: u32, col: u32) -> Option<TableLook> {
+        let (r1, c1, r2, c2) = self.range;
+        if row < r1 || row > r2 || col < c1 || col > c2 {
+            return None;
+        }
+        let header = row < r1 + self.header_rows;
+        let totals = row > r2 - self.totals_rows.min(r2 - r1);
+        let band = self.row_stripes && !header && !totals && (row - r1 - self.header_rows) % 2 == 0;
+        let light = tint(self.accent, 0.8);
+        let white = Color(255, 255, 255);
+        let line = BorderSide::Line { width: 0.75, color: self.accent, style: LineStyle::Solid };
+        let mut look = TableLook { fill: None, bold: header || totals || (self.first_column && col == c1), color: None, bottom: None };
+        match self.family.as_str() {
+            "Light" => {
+                if header {
+                    look.bottom = Some(line);
+                } else if band {
+                    look.fill = Some(light);
+                }
+            }
+            "Dark" => {
+                if header {
+                    look.fill = Some(Color(0, 0, 0));
+                    look.color = Some(white);
+                } else {
+                    look.fill = Some(if band { self.accent } else { shade(self.accent, 0.75) });
+                    look.color = Some(white);
+                }
+            }
+            _ => {
+                if header {
+                    look.fill = Some(self.accent);
+                    look.color = Some(white);
+                } else if band {
+                    look.fill = Some(light);
+                }
+                if totals {
+                    look.bottom = Some(line);
+                }
+            }
+        }
+        Some(look)
+    }
+}
+
+fn tint(c: Color, amount: f64) -> Color {
+    let mix = |x: u8| (x as f64 + (255.0 - x as f64) * amount).round() as u8;
+    Color(mix(c.0), mix(c.1), mix(c.2))
+}
+
+fn shade(c: Color, amount: f64) -> Color {
+    let mix = |x: u8| (x as f64 * amount).round() as u8;
+    Color(mix(c.0), mix(c.1), mix(c.2))
+}
+
+fn read_tables<R: Read + std::io::Seek>(archive: &mut zip::ZipArchive<R>, sheet_path: &str, theme: &Theme) -> Result<Vec<SheetTable>, Error> {
+    let (dir, file) = sheet_path.rsplit_once('/').unwrap_or(("", sheet_path));
+    let Some(rels) = entry(archive, &format!("{dir}/_rels/{file}.rels"))? else { return Ok(Vec::new()) };
+    let rels = xml::parse(&rels)?;
+    let mut tables = Vec::new();
+    for rel in rels.children("Relationship") {
+        if !rel.attr("Type").is_some_and(|t| t.ends_with("/table")) {
+            continue;
+        }
+        let Some(target) = rel.attr("Target") else { continue };
+        let Some(data) = entry(archive, &resolve_path(dir, target))? else { continue };
+        let root = xml::parse(&data)?;
+        let Some(range) = root.attr("ref").and_then(parse_range) else { continue };
+        let info = root.child("tableStyleInfo");
+        let name = info.and_then(|i| i.attr("name")).unwrap_or("");
+        let Some(rest) = name.strip_prefix("TableStyle") else { continue };
+        let family: String = rest.chars().take_while(|c| c.is_ascii_alphabetic()).collect();
+        let number: usize = rest[family.len()..].parse().unwrap_or(1);
+        let key = ["dk1", "accent1", "accent2", "accent3", "accent4", "accent5", "accent6"][(number.max(1) - 1) % 7];
+        let accent = theme.colors.get(key).copied().unwrap_or(if key == "dk1" { Color(0, 0, 0) } else { Color(0x44, 0x72, 0xC4) });
+        let flag = |name: &str, default: bool| info.and_then(|i| i.attr(name)).map_or(default, |v| v == "1" || v == "true");
+        let count = |name: &str, default: u32| root.attr(name).and_then(|v| v.parse().ok()).unwrap_or(default);
+        tables.push(SheetTable {
+            range,
+            header_rows: count("headerRowCount", 1),
+            totals_rows: count("totalsRowCount", 0),
+            row_stripes: flag("showRowStripes", true),
+            first_column: flag("showFirstColumn", false),
+            family,
+            accent: if key == "dk1" { Color(0x80, 0x80, 0x80) } else { accent },
+        });
+    }
+    Ok(tables)
 }
 
 struct Sheet {
+    scales: Vec<ColorScale>,
+    tables: Vec<SheetTable>,
     notes: BTreeMap<(u32, u32), String>,
     conditional: Vec<CondRule>,
     drawings: Vec<SheetDrawing>,
@@ -795,7 +1061,7 @@ fn rich_text(si: &Element, _styles: &Styles) -> Vec<(String, RunProps)> {
     runs
 }
 
-fn parse_sheet(root: &Element, styles: &Styles, shared: &[Vec<(String, RunProps)>], print_area: Option<&str>) -> Sheet {
+fn parse_sheet(root: &Element, styles: &Styles, shared: &[Vec<(String, RunProps)>], print_area: Option<&str>, theme: &Theme) -> Sheet {
     let format_pr = root.child("sheetFormatPr");
     let default_col_chars = format_pr
         .and_then(|f| f.attr("defaultColWidth"))
@@ -831,6 +1097,8 @@ fn parse_sheet(root: &Element, styles: &Styles, shared: &[Vec<(String, RunProps)
     let mut rows: BTreeMap<u32, RowData> = BTreeMap::new();
     let mut max_col = 0u32;
     let mut max_row = 0u32;
+    let mut shared_formulas: HashMap<String, (String, u32, u32)> = HashMap::new();
+    let mut pending: Vec<(u32, u32, String, i64, i64)> = Vec::new();
     if let Some(data) = root.child("sheetData") {
         for row in data.children("row") {
             let Some(r) = row.attr("r").and_then(|v| v.parse::<u32>().ok()).filter(|r| (1..=crate::limits::MAX_SHEET_ROWS).contains(r)) else { continue };
@@ -845,6 +1113,7 @@ fn parse_sheet(root: &Element, styles: &Styles, shared: &[Vec<(String, RunProps)
                 let style = cell.attr("s").and_then(|v| v.parse().ok()).unwrap_or(0);
                 let kind = cell.attr("t").unwrap_or("n");
                 let raw = cell.child("v").map(|v| v.text());
+                let cached = raw.as_deref().is_some_and(|v| !v.trim().is_empty());
                 let value = match kind {
                     "s" => raw
                         .and_then(|v| v.trim().parse::<usize>().ok())
@@ -863,9 +1132,28 @@ fn parse_sheet(root: &Element, styles: &Styles, shared: &[Vec<(String, RunProps)
                         .map(CellValue::Number)
                         .unwrap_or(CellValue::Empty),
                 };
+                let formula = cell.child("f");
+                let mut pending_formula = false;
+                if let Some(f) = formula {
+                    let text = f.text();
+                    let shared_index = (f.attr("t") == Some("shared")).then(|| f.attr("si").map(str::to_owned)).flatten();
+                    if let (Some(si), false) = (&shared_index, text.trim().is_empty()) {
+                        shared_formulas.insert(si.clone(), (text.clone(), r, c));
+                    }
+                    if !cached && kind != "inlineStr" {
+                        let source = match shared_index.as_ref().filter(|_| text.trim().is_empty()) {
+                            Some(si) => shared_formulas.get(si).map(|(t, mr, mc)| (t.clone(), i64::from(r) - i64::from(*mr), i64::from(c) - i64::from(*mc))),
+                            None => Some((text, 0, 0)),
+                        };
+                        if let Some(source) = source.filter(|s| !s.0.trim().is_empty()) {
+                            pending.push((r, c, source.0, source.1, source.2));
+                            pending_formula = true;
+                        }
+                    }
+                }
                 let xf = styles.xf(style);
                 let formatted = xf.fill.is_some() || has_border(&xf.borders);
-                if !matches!(value, CellValue::Empty) || formatted {
+                if !matches!(value, CellValue::Empty) || formatted || pending_formula {
                     max_col = max_col.max(c);
                     max_row = max_row.max(r);
                 }
@@ -874,6 +1162,8 @@ fn parse_sheet(root: &Element, styles: &Styles, shared: &[Vec<(String, RunProps)
             rows.insert(r, row_data);
         }
     }
+
+    resolve_formulas(&mut rows, pending, max_row, max_col);
 
     let mut merges = Vec::new();
     if let Some(mc) = root.child("mergeCells") {
@@ -941,6 +1231,26 @@ fn parse_sheet(root: &Element, styles: &Styles, shared: &[Vec<(String, RunProps)
     };
 
     Sheet {
+        scales: root
+            .children("conditionalFormatting")
+            .flat_map(|cf| {
+                let ranges: Vec<(u32, u32, u32, u32)> = cf.attr("sqref").unwrap_or("").split_whitespace().filter_map(parse_range).collect();
+                cf.children("cfRule")
+                    .filter_map(|rule| rule.child("colorScale"))
+                    .flat_map(|scale| {
+                        let stops: Vec<(String, Option<f64>, Color)> = scale
+                            .children("cfvo")
+                            .zip(scale.children("color"))
+                            .filter_map(|(cfvo, color)| {
+                                Some((cfvo.attr("type").unwrap_or("min").to_string(), cfvo.attr("val").and_then(|v| v.parse().ok()), parse_color(color, theme)?))
+                            })
+                            .collect();
+                        ranges.iter().map(move |range| ColorScale { range: *range, stops: stops.clone() }).collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect(),
+        tables: Vec::new(),
         notes: BTreeMap::new(),
         drawings: Vec::new(),
         col_widths: extent.col_widths,
@@ -1135,6 +1445,7 @@ fn paginate(sheet: &Sheet, name: &str, styles: &Styles, cells: &mut u64) -> Resu
                 inlines: Vec::new(),
                 anchors: Vec::new(),
                 list: None,
+                ..Paragraph::default()
             })],
             columns: 1,
             content_scale: 1.0,
@@ -1147,7 +1458,9 @@ fn paginate(sheet: &Sheet, name: &str, styles: &Styles, cells: &mut u64) -> Resu
     let printable_w = page.width - page.margin_left - page.margin_right;
     let printable_h = page.height - top_margin - bottom_margin;
 
-    let cols: Vec<u32> = (sheet.first_col..=sheet.last_col).collect();
+    let cols: Vec<u32> = (sheet.first_col..=sheet.last_col)
+        .filter(|c| sheet.col_widths.get((c - 1) as usize).is_none_or(|w| *w > 0.0))
+        .collect();
     let rows: Vec<u32> = (sheet.first_row..=sheet.last_row)
         .filter(|r| !sheet.rows.get(r).map(|d| d.hidden).unwrap_or(false))
         .collect();
@@ -1195,7 +1508,7 @@ fn paginate(sheet: &Sheet, name: &str, styles: &Styles, cells: &mut u64) -> Resu
 
     let mut sections = Vec::new();
     for (rg, cg) in order {
-        let table = build_table(sheet, rg, cg, styles, scale);
+        let table = build_table(sheet, name, rg, cg, styles, scale);
         let origin_x = sheet_x(sheet, cg[0] - 1);
         let origin_y = sheet_y(sheet, rg[0] - 1);
         let anchors: Vec<Anchor> = sheet
@@ -1206,7 +1519,7 @@ fn paginate(sheet: &Sheet, name: &str, styles: &Styles, cells: &mut u64) -> Resu
                 cg.contains(&col) && rg.contains(&row)
             })
             .map(|d| {
-                page_anchor(
+                let mut anchor = page_anchor(
                     page.margin_left + (d.x - origin_x) * scale,
                     top_margin + (d.y - origin_y) * scale,
                     d.width * scale,
@@ -1216,7 +1529,13 @@ fn paginate(sheet: &Sheet, name: &str, styles: &Styles, cells: &mut u64) -> Resu
                     false,
                     false,
                     false,
-                )
+                );
+                if !d.tag.is_empty() {
+                    let mut tag = Ref::new().str("sheet", name);
+                    tag.fields.extend(d.tag.fields.iter().cloned());
+                    anchor.drawing.tag = tag;
+                }
+                anchor
             })
             .collect();
         let notes = page_notes(sheet, rg, cg, page.margin_left + table.indent * scale, top_margin, scale);
@@ -1397,7 +1716,7 @@ fn group(items: &[u32], size: impl Fn(u32) -> f64, limit: f64, breaks: &[u32]) -
     groups
 }
 
-fn build_table(sheet: &Sheet, rows: &[u32], cols: &[u32], styles: &Styles, scale: f64) -> Table {
+fn build_table(sheet: &Sheet, name: &str, rows: &[u32], cols: &[u32], styles: &Styles, scale: f64) -> Table {
     let mut table = Table {
         columns: cols.iter().map(|c| sheet.col_widths.get((*c - 1) as usize).copied().unwrap_or(48.0)).collect(),
         cell_margins: CellMargins { top: Some(1.0), left: Some(1.0), bottom: Some(1.0), right: Some(1.0) },
@@ -1426,19 +1745,21 @@ fn build_table(sheet: &Sheet, rows: &[u32], cols: &[u32], styles: &Styles, scale
                 skip_until = None;
             }
             let covered = sheet.merges.iter().find(|(r1, c1, r2, c2)| r >= *r1 && r <= *r2 && c >= *c1 && c <= *c2);
-            let mut cell = Cell { span: 1, valign: VAlign::Bottom, ..Cell::default() };
+            let tag = Ref::new().str("sheet", name).str("cell", cell_name(r, c));
+            let mut cell = Cell { span: 1, valign: VAlign::Bottom, tag: tag.clone().kind("sheetCell"), ..Cell::default() };
             if let Some(&(r1, c1, r2, c2)) = covered {
-                if c != c1 {
+                if cols.iter().find(|k| **k >= c1 && **k <= c2) != Some(&c) {
                     continue;
                 }
+                let visible = cols.iter().filter(|k| **k >= c1 && **k <= c2).count().max(1);
                 if r != r1 {
                     cell.vertical_merge = Some(VerticalMerge::Continue);
-                    cell.span = (c2.min(*cols.last().unwrap()) - c1 + 1) as usize;
+                    cell.span = visible;
                     skip_until = Some(c2);
                     row.cells.push(cell);
                     continue;
                 }
-                cell.span = (c2.min(*cols.last().unwrap()) - c1 + 1) as usize;
+                cell.span = visible;
                 if r2 > r1 {
                     cell.vertical_merge = Some(VerticalMerge::Restart);
                 }
@@ -1455,6 +1776,25 @@ fn build_table(sheet: &Sheet, rows: &[u32], cols: &[u32], styles: &Styles, scale
             let own_xf = styles.xf(data.and_then(|d| d.cells.get(&c)).map(|d| d.style).unwrap_or(0));
             let mut font = styles.font(xf.font).clone();
             cell.shading = own_xf.fill;
+            if let Some(look) = sheet.tables.iter().find_map(|t| t.look(r, c)) {
+                if cell.shading.is_none() {
+                    cell.shading = look.fill;
+                }
+                if look.bold {
+                    font.bold = Some(true);
+                }
+                if let Some(color) = look.color {
+                    font.color = Some(color);
+                }
+                if let Some(side) = look.bottom {
+                    if cell.borders.bottom == BorderSide::Unset {
+                        cell.borders.bottom = side;
+                    }
+                }
+            }
+            if let Some(fill) = sheet.scales.iter().find_map(|s| s.color(sheet, r, c)) {
+                cell.shading = Some(fill);
+            }
             let mut cond_code: Option<String> = None;
             if let Some(dxf) = conditional_dxf(sheet, styles, r, c, cell_data.map(|d| &d.value)) {
                 font.merge(&dxf.font);
@@ -1532,6 +1872,12 @@ fn build_table(sheet: &Sheet, rows: &[u32], cols: &[u32], styles: &Styles, scale
                 }
                 Some(CellValue::Bool(b)) => (vec![(if *b { "TRUE".into() } else { "FALSE".into() }, font.clone())], Align::Right),
                 Some(CellValue::Error(e)) => (vec![(e.clone(), font.clone())], Align::Center),
+                Some(CellValue::Formula(text)) => {
+                    let mut props = font.clone();
+                    props.color = Some(Color(0x80, 0x80, 0x80));
+                    props.italic = Some(true);
+                    (vec![(text.clone(), props)], Align::Left)
+                }
                 _ => (Vec::new(), Align::Left),
             };
             let align = xf.h_align.unwrap_or(default_align);
@@ -1562,6 +1908,8 @@ fn build_table(sheet: &Sheet, rows: &[u32], cols: &[u32], styles: &Styles, scale
                     inlines,
                     anchors: Vec::new(),
                     list: None,
+                    tag,
+                    ..Paragraph::default()
                 }));
             }
             row.cells.push(cell);
@@ -1648,6 +1996,7 @@ fn header_footer(code: &str, sheet_name: &str, width: f64, base: &RunProps, scal
                 inlines,
                 anchors: Vec::new(),
                 list: None,
+                ..Paragraph::default()
             }));
         }
         row.cells.push(cell);

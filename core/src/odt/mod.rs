@@ -378,6 +378,7 @@ impl Reader<'_> {
             inlines,
             anchors,
             list,
+            ..Paragraph::default()
         }
     }
 

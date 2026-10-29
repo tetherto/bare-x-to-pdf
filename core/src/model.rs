@@ -18,6 +18,65 @@ impl Color {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum RefValue {
+    Int(i64),
+    Str(String),
+    Bool(bool),
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Ref {
+    pub kind: Option<&'static str>,
+    pub fields: Vec<(&'static str, RefValue)>,
+}
+
+impl Ref {
+    pub fn new() -> Ref {
+        Ref::default()
+    }
+
+    pub fn kind(mut self, kind: &'static str) -> Ref {
+        self.kind = Some(kind);
+        self
+    }
+
+    pub fn int(mut self, key: &'static str, value: i64) -> Ref {
+        self.set(key, RefValue::Int(value));
+        self
+    }
+
+    pub fn str(mut self, key: &'static str, value: impl Into<String>) -> Ref {
+        self.set(key, RefValue::Str(value.into()));
+        self
+    }
+
+    pub fn flag(mut self, key: &'static str) -> Ref {
+        self.set(key, RefValue::Bool(true));
+        self
+    }
+
+    pub fn set(&mut self, key: &'static str, value: RefValue) {
+        match self.fields.iter_mut().find(|(k, _)| *k == key) {
+            Some(field) => field.1 = value,
+            None => self.fields.push((key, value)),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.fields.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Region {
+    pub tag: Ref,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Generic {
     #[default]
@@ -40,6 +99,7 @@ pub struct Document {
     pub writer_text_offset: bool,
     pub footnote_separator_width: Option<f64>,
     pub cell_metrics: bool,
+    pub page_per_section: bool,
 }
 
 impl Document {
@@ -69,6 +129,8 @@ pub struct Section {
     pub content_scale: f64,
     pub anchors: Vec<Anchor>,
     pub notes: Vec<PageNote>,
+    pub regions: Vec<Region>,
+    pub tag: Ref,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -167,13 +229,15 @@ pub struct ColumnSeparator {
     pub dotted: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Paragraph {
     pub props: ParagraphProps,
     pub mark: RunProps,
     pub inlines: Vec<Inline>,
     pub anchors: Vec<Anchor>,
     pub list: Option<ListLabel>,
+    pub tag: Ref,
+    pub offsets: Vec<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -452,6 +516,7 @@ pub struct Table {
     pub borders: Borders,
     pub indent: f64,
     pub cell_margins: CellMargins,
+    pub tag: Ref,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -475,6 +540,7 @@ pub struct Cell {
     pub halign: Option<Align>,
     pub overflow_width: Option<f64>,
     pub overflow_shift: Option<f64>,
+    pub tag: Ref,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -642,6 +708,7 @@ pub struct Drawing {
     pub rotation: f64,
     pub flip_h: bool,
     pub flip_v: bool,
+    pub tag: Ref,
 }
 
 impl Drawing {
@@ -653,6 +720,7 @@ impl Drawing {
             rotation: 0.0,
             flip_h: false,
             flip_v: false,
+            tag: Ref::default(),
         }
     }
 }

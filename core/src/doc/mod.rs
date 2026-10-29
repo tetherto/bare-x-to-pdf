@@ -1207,7 +1207,7 @@ impl Reader<'_> {
             }
         }
 
-        Paragraph { props, mark, inlines, anchors: Vec::new(), list }
+        Paragraph { props, mark, inlines, anchors: Vec::new(), list, ..Paragraph::default() }
     }
 
     fn list_label(&self, lsid: u32, ilvl: u8, level: &ListLevelDef) -> Option<String> {

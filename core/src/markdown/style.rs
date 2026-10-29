@@ -104,7 +104,7 @@ pub fn list_label(text: &str, run: &RunProps, depth: usize) -> (ListLabel, f64, 
 }
 
 pub fn paragraph(props: ParagraphProps, mark: RunProps, inlines: Vec<Inline>, list: Option<ListLabel>) -> Block {
-    Block::Paragraph(Paragraph { props, mark, inlines, anchors: Vec::new(), list })
+    Block::Paragraph(Paragraph { props, mark, inlines, anchors: Vec::new(), list, ..Paragraph::default() })
 }
 
 pub fn rule(profile: &Profile) -> Block {
@@ -161,6 +161,7 @@ pub fn table(profile: &Profile, rows: Vec<Vec<TableCell>>) -> Block {
         borders,
         indent: 0.0,
         cell_margins: CellMargins { top: Some(margin - 0.085), left: Some(margin), bottom: Some(margin - 0.085), right: Some(margin) },
+        ..Table::default()
     })
 }
 
