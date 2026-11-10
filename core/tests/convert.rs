@@ -43,6 +43,18 @@ fn minimal_docx_to_pdf() {
 }
 
 #[test]
+fn arabic_docx_to_pdf() {
+    let pdf = convert_docx("rtl-arabic.docx");
+    assert!(pdf.starts_with(b"%PDF-"));
+}
+
+#[test]
+fn hebrew_docx_to_pdf() {
+    let pdf = convert_docx("rtl-hebrew.docx");
+    assert!(pdf.starts_with(b"%PDF-"));
+}
+
+#[test]
 fn styled_docx_to_pdf() {
     let pdf = convert_docx("sdk-sample.docx");
     assert!(pdf.starts_with(b"%PDF-"));

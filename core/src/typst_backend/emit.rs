@@ -59,7 +59,7 @@ impl Emitter<'_> {
 
         let _ = writeln!(
             self.out,
-            "#set text(font: {}, size: {}, top-edge: \"ascender\", bottom-edge: \"descender\", hyphenate: false, fallback: true, kerning: false, lang: \"en\")",
+            "#set text(font: {}, size: {}, top-edge: \"ascender\", bottom-edge: \"descender\", hyphenate: false, fallback: true, kerning: true, lang: \"en\")",
             typst_str(&family),
             pt(size)
         );
