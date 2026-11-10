@@ -3,6 +3,7 @@ build
 prebuilds
 core/target
 bench/out
+bench/report/*.html
 .DS_Store
 npm/*/prebuilds
 package-lock.json
