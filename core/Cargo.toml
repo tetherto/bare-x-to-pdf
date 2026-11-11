@@ -12,6 +12,7 @@ crate-type = ["staticlib", "rlib"]
 typst = "0.15"
 typst-pdf = "0.15"
 typst-layout = "0.15"
+typst-render = "0.15"
 zip = { version = "8", default-features = false, features = ["deflate"] }
 quick-xml = "0.42"
 ttf-parser = "0.25"

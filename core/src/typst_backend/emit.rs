@@ -9,12 +9,54 @@ const DEFAULT_SIZE: f64 = 11.0;
 const DEFAULT_CELL_MARGIN_X: f64 = 5.4;
 const TEXT_SHIFT: f64 = 0.1;
 
+const LITERAL_OPEN: char = '\u{FDD0}';
+const LITERAL_CLOSE: char = '\u{FDD1}';
+pub const LABEL_RUN: u32 = u32::MAX;
+pub const EMPTY_RUN: u32 = u32::MAX - 1;
+const MAX_LITERAL_BYTES: usize = 60_000;
+
 pub struct Emitted {
     pub source: String,
     pub files: Vec<(String, Vec<u8>)>,
+    pub marks: Marks,
 }
 
-pub fn emit(doc: &Document, fonts: &FontSet) -> Emitted {
+#[derive(Default)]
+pub struct Marks {
+    pub tags: Vec<Mark>,
+    pub literals: Vec<Literal>,
+    pub regions: Vec<(usize, Region)>,
+    pub bodies: Vec<(f64, f64)>,
+}
+
+pub struct Mark {
+    pub tag: Ref,
+    pub kind: &'static str,
+    pub colspan: usize,
+    pub rowspan: usize,
+    pub grid: bool,
+    pub width: Option<f64>,
+    pub height: Option<f64>,
+}
+
+pub struct Literal {
+    pub start: usize,
+    pub mark: usize,
+    pub run: u32,
+    pub value: String,
+    pub units: Vec<(u32, u32)>,
+}
+
+#[derive(Clone, Copy)]
+struct Origin {
+    mark: usize,
+    run: u32,
+    offset: u32,
+}
+
+type Unit = (char, u32, u32);
+
+pub fn emit(doc: &Document, fonts: &FontSet, map: bool) -> Emitted {
     let mut emitter = Emitter {
         doc,
         fonts,
@@ -23,15 +65,60 @@ pub fn emit(doc: &Document, fonts: &FontSet) -> Emitted {
         page: RefCell::new(PageSetup::default()),
         para_line: Cell::new(None),
         table_depth: Cell::new(0),
+        marks: map.then(|| RefCell::new(Marks::default())),
+        origin: Cell::new(None),
     };
     emitter.preamble();
     for (index, section) in doc.sections.iter().enumerate() {
         emitter.section(index, section);
     }
+    let mut marks = emitter.marks.map(RefCell::into_inner).unwrap_or_default();
+    let source = if marks.literals.is_empty() { emitter.out } else { place_literals(&emitter.out, &mut marks.literals) };
     Emitted {
-        source: emitter.out,
+        source,
         files: emitter.files.into_inner(),
+        marks,
     }
+}
+
+fn place_literals(source: &str, literals: &mut [Literal]) -> String {
+    let mut out = String::with_capacity(source.len() + literals.iter().map(|l| l.value.len() + 2).sum::<usize>());
+    let mut rest = source;
+    while let Some(open) = rest.find(LITERAL_OPEN) {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + LITERAL_OPEN.len_utf8()..];
+        let close = after.find(LITERAL_CLOSE).unwrap_or(after.len());
+        if let Some(literal) = after[..close].parse::<usize>().ok().and_then(|i| literals.get_mut(i)) {
+            literal.start = out.len();
+            out.push_str(&typst_str(&literal.value));
+        }
+        rest = after.get(close + LITERAL_CLOSE.len_utf8()..).unwrap_or("");
+    }
+    out.push_str(rest);
+    out
+}
+
+fn printable(units: &[Unit]) -> Vec<Unit> {
+    units.iter().copied().filter(|(c, _, _)| matches!(c, '\t' | '\n' | '\r') || ((*c as u32) >= 0x20 && *c != '\u{7f}')).collect()
+}
+
+fn units_of(text: &str, offset: u32) -> Vec<Unit> {
+    let mut at = offset;
+    text.chars()
+        .map(|c| {
+            let start = at;
+            at += c.len_utf16() as u32;
+            (c, start, at)
+        })
+        .collect()
+}
+
+fn value_of(units: &[Unit]) -> String {
+    units.iter().map(|u| u.0).collect()
+}
+
+fn uppercase(units: &[Unit]) -> Vec<Unit> {
+    units.iter().flat_map(|&(c, start, end)| c.to_uppercase().map(move |u| (u, start, end))).collect()
 }
 
 struct Emitter<'a> {
@@ -42,6 +129,8 @@ struct Emitter<'a> {
     page: RefCell<PageSetup>,
     para_line: Cell<Option<f64>>,
     table_depth: Cell<u32>,
+    marks: Option<RefCell<Marks>>,
+    origin: Cell<Option<Origin>>,
 }
 
 struct CellOut {
@@ -49,6 +138,9 @@ struct CellOut {
     rowspan: usize,
     args: Vec<String>,
     body: String,
+    mark: Option<usize>,
+    row: usize,
+    column: usize,
 }
 
 impl Emitter<'_> {
@@ -108,6 +200,15 @@ impl Emitter<'_> {
             let _ = writeln!(self.out, "#counter(page).update({})", start.clamp(0, i64::from(u32::MAX)));
         }
         let _ = writeln!(self.out, "#metadata(none) <section-{index}>");
+        if let Some(marks) = &self.marks {
+            let mut marks = marks.borrow_mut();
+            marks.bodies.push((page.margin.top, page.margin.bottom));
+            if !section.tag.is_empty() {
+                let tag = Ref { kind: section.tag.kind.or(Some("slide")), fields: section.tag.fields.clone() };
+                marks.regions.push((index, Region { tag, x: 0.0, y: 0.0, width: page.width, height: page.height }));
+            }
+            marks.regions.extend(section.regions.iter().map(|r| (index, r.clone())));
+        }
         for anchor in &section.anchors {
             let mut placed = String::new();
             self.anchor(anchor, &mut placed);
@@ -303,24 +404,37 @@ impl Emitter<'_> {
             self.anchor(anchor, out);
         }
 
-        let mut parts: Vec<Vec<&Inline>> = vec![Vec::new()];
-        for inline in &p.inlines {
+        let mark = self.mark(&p.tag, "paragraph");
+        let offsets = text_offsets(p);
+        let mut parts: Vec<Vec<(usize, &Inline)>> = vec![Vec::new()];
+        for (index, inline) in p.inlines.iter().enumerate() {
             if matches!(inline, Inline::PageBreak) {
                 parts.push(Vec::new());
             } else {
-                parts.last_mut().unwrap().push(inline);
+                parts.last_mut().unwrap().push((index, inline));
             }
         }
 
+        let mut start = 0;
         for (index, part) in parts.iter().enumerate() {
             if index > 0 {
                 out.push_str("#pagebreak()\n");
             }
-            self.paragraph_part(p, part, if index == 0 { gap } else { 0.0 }, first_in_group, last_in_group, out);
+            let source = Source { mark, offsets: &offsets, start };
+            self.paragraph_part(p, &source, part, if index == 0 { gap } else { 0.0 }, first_in_group, last_in_group, out);
+            start += part.len() + 1;
         }
     }
 
-    fn paragraph_part(&self, p: &Paragraph, inlines: &[&Inline], gap: f64, first_in_group: bool, last_in_group: bool, out: &mut String) {
+    fn paragraph_part(&self, p: &Paragraph, source: &Source, part: &[(usize, &Inline)], gap: f64, first_in_group: bool, last_in_group: bool, out: &mut String) {
+        let inlines: Vec<&Inline> = part.iter().map(|(_, inline)| *inline).collect();
+        let inlines = inlines.as_slice();
+        let origin = |run: u32, offset: u32| source.mark.map(|mark| Origin { mark, run, offset });
+        let part_offset = part
+            .first()
+            .map(|(index, _)| source.offsets[*index])
+            .or_else(|| source.offsets.get(source.start.saturating_sub(1)).copied())
+            .unwrap_or(0);
         if gap > 0.01 {
             let _ = writeln!(out, "#v({})", pt(gap));
         }
@@ -351,7 +465,7 @@ impl Emitter<'_> {
         let mut items: Vec<String> = Vec::new();
         let mut any_text = false;
         if let Some(label) = &p.list {
-            let label_expr = self.text_expr(&label.text, &label.props, spacing);
+            let label_expr = self.with_origin(origin(LABEL_RUN, 0), || self.text_expr(&label.text, &label.props, spacing));
             match label.suffix {
                 ListSuffix::Tab if hanging > 0.01 => {
                     let mut label_stops = stops.clone();
@@ -374,7 +488,7 @@ impl Emitter<'_> {
                 }
                 ListSuffix::Space => {
                     items.push(label_expr.to_string());
-                    items.push(self.text_expr(" ", &label.props, spacing).to_string());
+                    items.push(self.with_origin(origin(LABEL_RUN, 0), || self.text_expr(" ", &label.props, spacing)));
                     x = None;
                 }
                 ListSuffix::Nothing => {
@@ -384,19 +498,21 @@ impl Emitter<'_> {
             }
             any_text = true;
         }
-        for inline in inlines {
+        for &(index, inline) in part {
             match inline {
                 Inline::Text { text, props } => {
                     if text.is_empty() {
                         continue;
                     }
                     any_text = true;
+                    let mut offset = source.offsets[index];
                     if split_words {
                         for token in split_tokens(text) {
-                            items.push(self.text_expr(&token, props, spacing));
+                            items.push(self.with_origin(origin(index as u32, offset), || self.text_expr(&token, props, spacing)));
+                            offset += token.encode_utf16().count() as u32;
                         }
                     } else {
-                        items.push(self.text_expr(text, props, spacing));
+                        items.push(self.with_origin(origin(index as u32, offset), || self.text_expr(text, props, spacing)));
                     }
                     x = None;
                 }
@@ -420,7 +536,9 @@ impl Emitter<'_> {
                 Inline::PageBreak => {}
                 Inline::Drawing(drawing) => {
                     any_text = true;
-                    items.push(format!("#box({})", self.drawing_expr(drawing)));
+                    let (open, close) = self.drawing_marks(drawing);
+                    let expr = format!("#box({})", self.drawing_expr(drawing));
+                    items.push(if open.is_empty() { expr } else { format!("#[{open}{expr}{close}]") });
                     x = None;
                 }
                 Inline::Footnote(blocks) => {
@@ -440,7 +558,7 @@ impl Emitter<'_> {
         }
         let _ = x;
         if !any_text {
-            items.insert(0, self.text_expr_line("\u{a0}", &p.mark, spacing, true));
+            items.insert(0, self.with_origin(origin(EMPTY_RUN, part_offset), || self.text_expr_line("\u{a0}", &p.mark, spacing, true)));
         }
 
         let body: String = items.concat();
@@ -544,20 +662,25 @@ impl Emitter<'_> {
         match blocks {
             [Block::Paragraph(p)] => {
                 let spacing = p.props.line_spacing.unwrap_or(LineSpacing::Multiple(1.0));
+                let mark = self.mark(&p.tag, "paragraph");
+                let offsets = text_offsets(p);
                 let mut out = String::new();
-                for inline in &p.inlines {
+                for (index, inline) in p.inlines.iter().enumerate() {
+                    let origin = mark.map(|mark| Origin { mark, run: index as u32, offset: offsets[index] });
                     match inline {
-                        Inline::Text { text, props } if !text.is_empty() => out.push_str(&self.text_expr(text, props, spacing)),
+                        Inline::Text { text, props } if !text.is_empty() => out.push_str(&self.with_origin(origin, || self.text_expr(text, props, spacing))),
                         Inline::Tab => out.push_str("#h(1em)"),
                         Inline::LineBreak => out.push_str("#linebreak()"),
                         Inline::Drawing(drawing) => {
-                            let _ = write!(out, "#box({})", self.drawing_expr(drawing));
+                            let (open, close) = self.drawing_marks(drawing);
+                            let _ = write!(out, "{open}#box({}){close}", self.drawing_expr(drawing));
                         }
                         _ => {}
                     }
                 }
                 if out.is_empty() {
-                    self.text_expr("\u{a0}", &p.mark, spacing)
+                    let origin = mark.map(|mark| Origin { mark, run: EMPTY_RUN, offset: 0 });
+                    self.with_origin(origin, || self.text_expr("\u{a0}", &p.mark, spacing))
                 } else {
                     out
                 }
@@ -639,42 +762,103 @@ impl Emitter<'_> {
     }
 
     fn text_expr_line(&self, text: &str, props: &RunProps, spacing: LineSpacing, empty_line: bool) -> String {
-        let text = &if self.table_depth.get() > 0 && !self.doc.cell_metrics { hyphen_break_opportunities(text) } else { std::borrow::Cow::Borrowed(text) };
-        if props.caps == Some(true) {
-            return self.text_expr_content_line(&typst_str(&text.to_uppercase()), props, spacing, empty_line);
+        let mut units = units_of(text, self.origin.get().map_or(0, |o| o.offset));
+        if self.table_depth.get() > 0 && !self.doc.cell_metrics {
+            units = hyphen_break_opportunities(units);
         }
-        if props.small_caps == Some(true) && text.chars().any(char::is_lowercase) {
+        if props.caps == Some(true) {
+            return self.text_expr_content_line(&self.literal(&uppercase(&units)), props, spacing, empty_line);
+        }
+        if props.small_caps == Some(true) && units.iter().any(|u| u.0.is_lowercase()) {
             let family = self.family(props);
             let size = props.size.unwrap_or(DEFAULT_SIZE);
             let (top, bottom) = self.edges(&family, props, size, spacing, empty_line);
             let mut small = props.clone();
             small.size = Some(size * 0.8);
             let mut out = String::new();
-            let mut segment = String::new();
+            let mut segment: Vec<Unit> = Vec::new();
             let mut segment_lower = false;
-            let flush = |segment: &mut String, lower: bool, out: &mut String| {
+            let flush = |segment: &mut Vec<Unit>, lower: bool, out: &mut String| {
                 if segment.is_empty() {
                     return;
                 }
                 if lower {
-                    out.push_str(&self.text_with_edges(&typst_str(&segment.to_uppercase()), &small, &family, size * 0.8, top, bottom));
+                    out.push_str(&self.text_with_edges(&self.literal(&uppercase(segment)), &small, &family, size * 0.8, top, bottom));
                 } else {
-                    out.push_str(&self.text_with_edges(&typst_str(segment), props, &family, size, top, bottom));
+                    out.push_str(&self.text_with_edges(&self.literal(segment), props, &family, size, top, bottom));
                 }
                 segment.clear();
             };
-            for ch in text.chars() {
-                let lower = ch.is_lowercase();
+            for unit in units {
+                let lower = unit.0.is_lowercase();
                 if lower != segment_lower {
                     flush(&mut segment, segment_lower, &mut out);
                     segment_lower = lower;
                 }
-                segment.push(ch);
+                segment.push(unit);
             }
             flush(&mut segment, segment_lower, &mut out);
             return out;
         }
-        self.text_expr_content_line(&typst_str(text), props, spacing, empty_line)
+        self.text_expr_content_line(&self.literal(&units), props, spacing, empty_line)
+    }
+
+    fn literal(&self, units: &[Unit]) -> String {
+        let (Some(marks), Some(origin)) = (self.marks.as_ref(), self.origin.get()) else {
+            return typst_str(&value_of(units));
+        };
+        let units = printable(units);
+        let mut marks = marks.borrow_mut();
+        let mut chunks = Vec::new();
+        let mut rest = units.as_slice();
+        while chunks.is_empty() || !rest.is_empty() {
+            let mut bytes = 0;
+            let take = rest.iter().take_while(|u| {
+                bytes += u.0.len_utf8();
+                bytes <= MAX_LITERAL_BYTES
+            });
+            let count = take.count().max(1).min(rest.len());
+            let (chunk, tail) = rest.split_at(count);
+            let index = marks.literals.len();
+            marks.literals.push(Literal {
+                start: 0,
+                mark: origin.mark,
+                run: origin.run,
+                value: value_of(chunk),
+                units: chunk.iter().map(|u| (u.1, u.2)).collect(),
+            });
+            chunks.push(format!("{LITERAL_OPEN}{index}{LITERAL_CLOSE}"));
+            rest = tail;
+        }
+        if chunks.len() == 1 {
+            chunks.remove(0)
+        } else {
+            format!("[#{}]", chunks.join("#"))
+        }
+    }
+
+    fn mark(&self, tag: &Ref, kind: &'static str) -> Option<usize> {
+        if tag.is_empty() {
+            return None;
+        }
+        let mut marks = self.marks.as_ref()?.borrow_mut();
+        marks.tags.push(Mark {
+            tag: tag.clone(),
+            kind: tag.kind.unwrap_or(kind),
+            colspan: 1,
+            rowspan: 1,
+            grid: false,
+            width: None,
+            height: None,
+        });
+        Some(marks.tags.len())
+    }
+
+    fn with_origin<T>(&self, origin: Option<Origin>, body: impl FnOnce() -> T) -> T {
+        let outer = self.origin.replace(origin);
+        let result = body();
+        self.origin.set(outer);
+        result
     }
 
     fn text_expr_content(&self, content: &str, props: &RunProps, spacing: LineSpacing) -> String {
@@ -711,7 +895,7 @@ impl Emitter<'_> {
             args.push(format!("fill: rgb({})", typst_str(&color.hex())));
         }
 
-        let mut expr = format!("text({}, {})", args.join(", "), content);
+        let mut expr = format!("text({})[#{}]", args.join(", "), content);
         if let Some((side @ BorderSide::Line { width, .. }, space)) = props.border {
             expr = format!("box(stroke: {}, inset: {}, {expr})", stroke(side), pt(space + width));
         }
@@ -1177,7 +1361,21 @@ impl Emitter<'_> {
         expr
     }
 
+    fn drawing_marks(&self, drawing: &Drawing) -> (String, String) {
+        let kind = match drawing.content {
+            DrawingContent::Image(_) => "image",
+            DrawingContent::Chart(_) => "chart",
+            DrawingContent::Table(_) => "table",
+            DrawingContent::TextBox(_) | DrawingContent::Placeholder(_) => "shape",
+        };
+        match self.mark(&drawing.tag, kind) {
+            Some(n) => (format!("#metadata({n})"), format!("#metadata(-{n})")),
+            None => (String::new(), String::new()),
+        }
+    }
+
     fn anchor(&self, anchor: &Anchor, out: &mut String) {
+        let (open, close) = self.drawing_marks(&anchor.drawing);
         let expr = self.drawing_expr(&anchor.drawing);
         let page = self.page.borrow().clone();
         let margin = &page.margin;
@@ -1191,10 +1389,10 @@ impl Emitter<'_> {
         let dx = dx - self.text_shift();
         match anchor.vertical {
             VPosition::Offset(VRef::Page, y) => {
-                let _ = writeln!(out, "#place(top + {h_align}, dx: {}, dy: {}, {expr})", pt(dx), pt(y - margin.top));
+                let _ = writeln!(out, "{open}#place(top + {h_align}, dx: {}, dy: {}, {expr}){close}", pt(dx), pt(y - margin.top));
             }
             VPosition::Offset(VRef::Margin, y) => {
-                let _ = writeln!(out, "#place(top + {h_align}, dx: {}, dy: {}, {expr})", pt(dx), pt(y));
+                let _ = writeln!(out, "{open}#place(top + {h_align}, dx: {}, dy: {}, {expr}){close}", pt(dx), pt(y));
             }
             VPosition::Align(VRef::Page | VRef::Margin, align) => {
                 let v = match align {
@@ -1202,7 +1400,7 @@ impl Emitter<'_> {
                     VAnchorAlign::Center => "horizon",
                     VAnchorAlign::Bottom => "bottom",
                 };
-                let _ = writeln!(out, "#place({v} + {h_align}, dx: {}, {expr})", pt(dx));
+                let _ = writeln!(out, "{open}#place({v} + {h_align}, dx: {}, {expr}){close}", pt(dx));
             }
             VPosition::Offset(_, _) | VPosition::Align(_, _) => {
                 let y = match anchor.vertical {
@@ -1211,7 +1409,7 @@ impl Emitter<'_> {
                 };
                 let _ = writeln!(
                     out,
-                    "#context {{ let inner = {expr}; let m = measure(inner); block(width: 100%, height: 0pt, place(top + {h_align}, dx: {}, dy: {}, box(width: m.width, height: m.height, inner))) }}",
+                    "{open}#context {{ let inner = {expr}; let m = measure(inner); block(width: 100%, height: 0pt, place(top + {h_align}, dx: {}, dy: {}, box(width: m.width, height: m.height, inner))) }}{close}",
                     pt(dx),
                     pt(y)
                 );
@@ -1229,7 +1427,17 @@ impl Emitter<'_> {
         if table.rows.is_empty() {
             return;
         }
-        let _ = writeln!(out, "#{}", self.table_expr(table));
+        match self.mark(&table.tag, "table") {
+            Some(n) => {
+                if let Some(marks) = &self.marks {
+                    marks.borrow_mut().tags[n - 1].grid = true;
+                }
+                let _ = writeln!(out, "#metadata({n})#{}#metadata(-{n})", self.table_expr(table));
+            }
+            None => {
+                let _ = writeln!(out, "#{}", self.table_expr(table));
+            }
+        }
     }
 
     fn table_expr(&self, table: &Table) -> String {
@@ -1401,11 +1609,18 @@ impl Emitter<'_> {
                     VAlign::Top => {}
                 }
 
+                let mark = self.mark(&cell.tag, "cell");
+                if let Some(n) = mark {
+                    body = format!("#metadata({n}){body}");
+                }
                 cells.push(CellOut {
                     colspan: crate::limits::span(cell.span),
                     rowspan: 1,
                     args,
                     body,
+                    mark,
+                    row: ri,
+                    column,
                 });
                 column += crate::limits::span(cell.span);
             }
@@ -1430,6 +1645,22 @@ impl Emitter<'_> {
             rows_arg = format!("rows: ({}), ", tuple(&rows));
         }
 
+        if let Some(marks) = &self.marks {
+            let mut marks = marks.borrow_mut();
+            for cell in &cells {
+                if let Some(mark) = cell.mark.and_then(|n| marks.tags.get_mut(n - 1)) {
+                    mark.colspan = cell.colspan;
+                    mark.rowspan = cell.rowspan;
+                    if fixed_columns {
+                        mark.width = table.columns.get(cell.column..cell.column + cell.colspan).map(|w| w.iter().sum());
+                    }
+                    let rows = table.rows.get(cell.row..cell.row + cell.rowspan).unwrap_or(&[]);
+                    if !rows.is_empty() && rows.iter().all(|r| r.exact_height && r.height.is_some()) {
+                        mark.height = Some(rows.iter().filter_map(|r| r.height).sum());
+                    }
+                }
+            }
+        }
         let rendered: Vec<String> = cells
             .iter()
             .map(|c| {
@@ -1480,6 +1711,31 @@ impl Emitter<'_> {
             _ => 0.0,
         }
     }
+}
+
+struct Source<'a> {
+    mark: Option<usize>,
+    offsets: &'a [u32],
+    start: usize,
+}
+
+fn text_offsets(p: &Paragraph) -> Vec<u32> {
+    if p.offsets.len() == p.inlines.len() {
+        return p.offsets.clone();
+    }
+    let mut at = 0u32;
+    p.inlines
+        .iter()
+        .map(|inline| {
+            let start = at;
+            at += match inline {
+                Inline::Text { text, .. } => text.encode_utf16().count() as u32,
+                Inline::Tab | Inline::LineBreak => 1,
+                _ => 0,
+            };
+            start
+        })
+        .collect()
 }
 
 fn png_size(data: &[u8]) -> Option<(u32, u32)> {
@@ -1597,22 +1853,21 @@ pub fn pt(value: f64) -> String {
     format!("{rounded}pt")
 }
 
-fn hyphen_break_opportunities(text: &str) -> std::borrow::Cow<'_, str> {
-    let chars: Vec<char> = text.chars().collect();
+fn hyphen_break_opportunities(units: Vec<Unit>) -> Vec<Unit> {
     let breaks_after = |i: usize| {
-        chars[i] == '-' && i > 0 && chars[i - 1].is_alphabetic() && chars.get(i + 1).is_some_and(|c| c.is_ascii_digit())
+        units[i].0 == '-' && i > 0 && units[i - 1].0.is_alphabetic() && units.get(i + 1).is_some_and(|u| u.0.is_ascii_digit())
     };
-    if !(0..chars.len()).any(breaks_after) {
-        return std::borrow::Cow::Borrowed(text);
+    if !(0..units.len()).any(breaks_after) {
+        return units;
     }
-    let mut out = String::with_capacity(text.len() + 3);
-    for (i, ch) in chars.iter().enumerate() {
-        out.push(*ch);
+    let mut out = Vec::with_capacity(units.len() + 3);
+    for (i, unit) in units.iter().enumerate() {
+        out.push(*unit);
         if breaks_after(i) {
-            out.push('\u{200B}');
+            out.push(('\u{200B}', unit.2, unit.2));
         }
     }
-    std::borrow::Cow::Owned(out)
+    out
 }
 
 pub fn typst_str(text: &str) -> String {
@@ -1622,7 +1877,7 @@ pub fn typst_str(text: &str) -> String {
         match ch {
             '\\' => out.push_str("\\\\"),
             '"' => out.push_str("\\\""),
-            '\t' | '\n' | '\r' => {
+            '\t' | '\n' | '\r' | LITERAL_OPEN | LITERAL_CLOSE => {
                 let _ = write!(out, "\\u{{{:x}}}", ch as u32);
             }
             c if (c as u32) < 0x20 || c == '\u{7f}' => {}

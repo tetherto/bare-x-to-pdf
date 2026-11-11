@@ -464,6 +464,19 @@ fn call(name: &str, args: Vec<Value>) -> Option<Value> {
         }
         "VALUE" | "N" => Value::Num(first.number()?),
         "EXACT" => Value::Bool(first.text() == args.get(1)?.text()),
+        "PRODUCT" => Value::Num(nums.iter().product()),
+        "POWER" => Value::Num(first.number()?.powf(args.get(1)?.number()?)),
+        "SQRT" => Value::Num(first.number()?.sqrt()),
+        "SIGN" => Value::Num(first.number()?.signum()),
+        "PI" => Value::Num(std::f64::consts::PI),
+        "ROUNDUP" | "ROUNDDOWN" => {
+            let digits = args.get(1).and_then(Value::number).unwrap_or(0.0);
+            let factor = 10f64.powf(digits);
+            let scaled = first.number()? * factor;
+            let rounded = if name == "ROUNDUP" { scaled.abs().ceil() } else { scaled.abs().floor() };
+            Value::Num(rounded.copysign(scaled) / factor)
+        }
+        "CONCAT" | "CONCATENATE" => Value::Str(args.iter().flat_map(Value::scalars).map(|v| v.text()).collect()),
         "ISEVEN" => Value::Bool(first.number()? as i64 % 2 == 0),
         "ISODD" => Value::Bool(first.number()? as i64 % 2 != 0),
         _ => return None,

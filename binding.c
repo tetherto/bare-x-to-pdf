@@ -20,7 +20,9 @@ typedef struct {
   char *from;
   char *to;
   char *fonts_dir;
+  char *request;
   sc_buffer_t out;
+  sc_buffer_t meta;
   sc_buffer_t error;
   int status;
 } simple_converter_job_t;
@@ -77,7 +79,9 @@ simple_converter__job_release(simple_converter_job_t *job) {
   free(job->from);
   free(job->to);
   free(job->fonts_dir);
+  free(job->request);
   sc_free(&job->out);
+  sc_free(&job->meta);
   sc_free(&job->error);
 }
 
@@ -87,8 +91,8 @@ simple_converter__job_init(js_env_t *env, js_callback_info_t *info, bool copy_in
 
   memset(job, 0, sizeof(*job));
 
-  size_t argc = 4;
-  js_value_t *argv[4];
+  size_t argc = 5;
+  js_value_t *argv[5];
 
   err = js_get_callback_info(env, info, &argc, argv, NULL, NULL);
   assert(err == 0);
@@ -119,9 +123,16 @@ simple_converter__job_init(js_env_t *env, js_callback_info_t *info, bool copy_in
             simple_converter__string(env, argv[2], &job->to) &&
             simple_converter__string(env, argv[3], &job->fonts_dir);
 
+  if (ok && argc >= 5) {
+    js_value_type_t request_type;
+    err = js_typeof(env, argv[4], &request_type);
+    assert(err == 0);
+    if (request_type != js_undefined) ok = simple_converter__string(env, argv[4], &job->request);
+  }
+
   if (!ok) {
     simple_converter__job_release(job);
-    err = js_throw_error(env, NULL, "from, to and fontsDir must be strings without NUL characters");
+    err = js_throw_error(env, NULL, "from, to, fontsDir and options must be strings without NUL characters");
     assert(err == 0);
     return false;
   }
@@ -146,7 +157,7 @@ simple_converter__job_init(js_env_t *env, js_callback_info_t *info, bool copy_in
 
 static void
 simple_converter__run(simple_converter_job_t *job) {
-  job->status = sc_convert(job->input, job->input_len, job->from, job->to, job->fonts_dir, &job->out, &job->error);
+  job->status = sc_convert_with(job->input, job->input_len, job->from, job->to, job->fonts_dir, job->request, &job->out, job->request ? &job->meta : NULL, &job->error);
 }
 
 static void
@@ -185,6 +196,30 @@ simple_converter__output(js_env_t *env, simple_converter_job_t *job) {
 }
 
 static js_value_t *
+simple_converter__result(js_env_t *env, simple_converter_job_t *job) {
+  int err;
+
+  js_value_t *data = simple_converter__output(env, job);
+  if (job->request == NULL) return data;
+
+  js_value_t *meta;
+  err = js_create_string_utf8(env, (utf8_t *) (job->meta.data ? (char *) job->meta.data : "{}"), job->meta.data ? job->meta.len : 2, &meta);
+  assert(err == 0);
+
+  js_value_t *result;
+  err = js_create_array_with_length(env, 2, &result);
+  assert(err == 0);
+
+  err = js_set_element(env, result, 0, data);
+  assert(err == 0);
+
+  err = js_set_element(env, result, 1, meta);
+  assert(err == 0);
+
+  return result;
+}
+
+static js_value_t *
 simple_converter__error(js_env_t *env, simple_converter_job_t *job) {
   int err;
 
@@ -215,7 +250,7 @@ simple_converter_convert_sync(js_env_t *env, js_callback_info_t *info) {
   js_value_t *result = NULL;
 
   if (job.status == 0) {
-    result = simple_converter__output(env, &job);
+    result = simple_converter__result(env, &job);
   } else {
     err = js_throw(env, simple_converter__error(env, &job));
     assert(err == 0);
@@ -248,7 +283,7 @@ simple_converter__on_after_work(uv_work_t *work, int status) {
     assert(err == 0);
 
     if (status == 0 && req->job.status == 0) {
-      err = js_resolve_deferred(env, req->deferred, simple_converter__output(env, &req->job));
+      err = js_resolve_deferred(env, req->deferred, simple_converter__result(env, &req->job));
     } else {
       err = js_reject_deferred(env, req->deferred, simple_converter__error(env, &req->job));
     }

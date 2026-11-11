@@ -900,7 +900,7 @@ fn read_sheet(records: &[Record], globals: &Globals, print_area: Option<(u32, u3
         };
         let (x, y) = (x_of(anchor.col1, anchor.dx1), y_of(anchor.row1, anchor.dy1));
         let (x2, y2) = (x_of(anchor.col2, anchor.dx2), y_of(anchor.row2, anchor.dy2));
-        drawings.push(SheetDrawing { x, y, width: (x2 - x).max(0.0), height: (y2 - y).max(0.0), content });
+        drawings.push(SheetDrawing { x, y, width: (x2 - x).max(0.0), height: (y2 - y).max(0.0), content, tag: Ref::default() });
         builder.max_row = builder.max_row.max(anchor.row2 as u32 + 1);
         builder.max_col = builder.max_col.max(anchor.col2 as u32 + 1);
     }
@@ -910,6 +910,8 @@ fn read_sheet(records: &[Record], globals: &Globals, print_area: Option<(u32, u3
         .filter_map(|(r, c, id)| texts.get(&id).map(|t| ((r, c), t.clone())))
         .collect();
     let sheet = Sheet {
+        scales: Vec::new(),
+        tables: Vec::new(),
         notes,
         conditional,
         drawings,

@@ -25,6 +25,10 @@ impl ConverterWorld {
         }
     }
 
+    pub fn main_source(&self) -> &Source {
+        &self.source
+    }
+
     pub fn add_file(&mut self, path: &str, data: Vec<u8>) -> Result<(), Error> {
         let vpath = VirtualPath::new(path).map_err(|e| Error::new(format!("virtual path {path}: {e:?}")))?;
         let id = RootedPath::new(VirtualRoot::Project, vpath).intern();

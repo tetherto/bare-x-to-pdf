@@ -74,7 +74,18 @@ pub fn read(bytes: &[u8]) -> Result<Document, Error> {
                 continue;
             }
             if let Some(id) = note.attr("id") {
-                notes.insert(id.to_string(), note_reader.blocks(note));
+                let mut blocks = note_reader.blocks(note);
+                let part = if note.name == "footnote" { "footnote" } else { "endnote" };
+                let base = Ref::new().str("part", part).str("id", id);
+                let mut paragraphs = Vec::new();
+                collect_paragraphs(&mut blocks, &mut paragraphs);
+                let several = paragraphs.len() > 1;
+                for (index, paragraph) in paragraphs.into_iter().enumerate() {
+                    paragraph.tag = Ref::new();
+                    let tag = if several { base.clone().int("paragraph", index as i64) } else { base.clone() };
+                    tag_paragraph(paragraph, &tag);
+                }
+                notes.insert(id.to_string(), blocks);
             }
         }
     }
@@ -130,10 +141,16 @@ pub fn read(bytes: &[u8]) -> Result<Document, Error> {
     let mut blocks = Vec::new();
     let mut previous: Option<Section> = None;
     let mut joined: Option<Paragraph> = None;
+    let mut block_index = 0i64;
     for el in body.elements() {
+        let base = Ref::new().str("part", "body").int("block", block_index);
+        if matches!(el.name.as_str(), "p" | "tbl" | "sdt") {
+            block_index += 1;
+        }
         match el.name.as_str() {
             "p" => {
                 let mut paragraph = reader.paragraph(el);
+                tag_paragraph(&mut paragraph, &base);
                 let sect = el.child("pPr").and_then(|p| p.child("sectPr"));
                 if sect.is_some() && paragraph.inlines.is_empty() {
                     paragraph.list = None;
@@ -156,6 +173,11 @@ pub fn read(bytes: &[u8]) -> Result<Document, Error> {
                 }
             }
             "sectPr" => {}
+            "tbl" | "sdt" => {
+                let mut produced = reader.blocks_of(el);
+                tag_body_block(&mut produced, &base, el.name == "sdt");
+                blocks.extend(produced);
+            }
             _ => blocks.extend(reader.blocks_of(el)),
         }
     }
@@ -247,7 +269,19 @@ fn build_section<R: Read + std::io::Seek>(
             counters: RefCell::new(Counters::default()),
             footnotes: &HashMap::new(),
         };
-        let content = reader.blocks(&root);
+        let mut content = reader.blocks(&root);
+        let kind = match reference.attr("type") {
+            Some("first") => "first",
+            Some("even") => "even",
+            _ => "default",
+        };
+        let base = Ref::new().str("part", if is_header { "header" } else { "footer" }).str("type", kind);
+        let mut paragraphs = Vec::new();
+        collect_paragraphs(&mut content, &mut paragraphs);
+        for (index, paragraph) in paragraphs.into_iter().enumerate() {
+            paragraph.tag = Ref::new();
+            tag_paragraph(paragraph, &base.clone().int("paragraph", index as i64));
+        }
         let slot = match (is_header, reference.attr("type")) {
             (true, Some("first")) => &mut section.header_first,
             (true, Some("even")) => &mut section.header_even,
@@ -428,6 +462,10 @@ impl Reader<'_> {
         let mut anchors = Vec::new();
         let mut field = FieldState::default();
         self.runs(el, &base, &mut inlines, &mut anchors, &mut field);
+        let mut tag = Ref::new();
+        if let Some(id) = el.attr("paraId") {
+            tag = tag.str("id", id.to_ascii_uppercase());
+        }
 
         Paragraph {
             props,
@@ -435,6 +473,8 @@ impl Reader<'_> {
             inlines,
             anchors,
             list,
+            tag,
+            offsets: field.offsets,
         }
     }
 
@@ -453,6 +493,8 @@ impl Reader<'_> {
                     let instr = el.attr("instr").unwrap_or("");
                     match field_kind(instr) {
                         Some(kind) => {
+                            field.offsets.push(field.offset);
+                            field.offset += text_length(el);
                             let props = el
                                 .elements()
                                 .find(|r| r.name == "r")
@@ -491,10 +533,29 @@ impl Reader<'_> {
             props.merge(&styles::parse_rpr(rpr, self.theme));
         }
         if props.hidden == Some(true) {
+            field.offset += el.elements().map(engine_length).sum::<u32>();
             return;
         }
 
         for child in el.elements() {
+            let offset = field.offset;
+            let pushed = out.len();
+            self.run_child(child, &props, base, out, anchors, field);
+            field.offsets.resize(out.len().max(pushed), offset);
+            field.offset += engine_length(child);
+        }
+    }
+
+    fn run_child(
+        &self,
+        child: &Element,
+        props: &RunProps,
+        base: &RunProps,
+        out: &mut Vec<Inline>,
+        anchors: &mut Vec<Anchor>,
+        field: &mut FieldState,
+    ) {
+        {
             match child.name.as_str() {
                 "fldChar" => match child.attr("fldCharType") {
                     Some("begin") => {
@@ -571,7 +632,9 @@ impl Reader<'_> {
                 "pict" | "object" => self.pict(child, out, anchors),
                 "AlternateContent" => {
                     if let Some(choice) = child.child("Choice") {
+                        let offset = field.offset;
                         self.run(choice, base, out, anchors, field);
+                        field.offset = offset;
                     }
                 }
                 _ => {}
@@ -602,6 +665,7 @@ impl Reader<'_> {
         let width = extent.attr("cx").and_then(emu)?;
         let height = extent.attr("cy").and_then(emu)?;
         let data = el.child("graphic").and_then(|g| g.child("graphicData"));
+        let doc_pr = el.child("docPr").and_then(|d| d.attr("id")).and_then(|id| id.trim().parse::<i64>().ok());
         let content = match data.and_then(|d| d.elements().next()) {
             Some(node) if node.name == "pic" => self.picture(node),
             Some(node) if node.name == "wsp" => self.shape(node),
@@ -611,7 +675,11 @@ impl Reader<'_> {
             Some(node) if node.name == "chart" => node.attr("id").and_then(|id| self.charts.get(id)).cloned().unwrap_or(DrawingContent::Placeholder(None)),
             _ => DrawingContent::Placeholder(None),
         };
-        Some(Drawing::new(width, height, content))
+        let mut drawing = Drawing::new(width, height, content);
+        if let Some(id) = doc_pr {
+            drawing.tag = Ref::new().int("docPr", id);
+        }
+        Some(drawing)
     }
 
     fn picture(&self, pic: &Element) -> DrawingContent {
@@ -935,11 +1003,121 @@ fn anchor(el: &Element, drawing: Drawing) -> Anchor {
     }
 }
 
+fn joined(base: &Ref, own: &Ref) -> Ref {
+    let mut tag = base.clone();
+    for (key, value) in &own.fields {
+        tag.set(key, value.clone());
+    }
+    tag
+}
+
+fn tag_paragraph(paragraph: &mut Paragraph, base: &Ref) {
+    paragraph.tag = joined(base, &paragraph.tag);
+    let drawings = paragraph
+        .inlines
+        .iter_mut()
+        .filter_map(|inline| match inline {
+            Inline::Drawing(drawing) => Some(drawing),
+            _ => None,
+        })
+        .chain(paragraph.anchors.iter_mut().map(|anchor| &mut anchor.drawing));
+    for drawing in drawings {
+        if !drawing.tag.is_empty() {
+            let mut tag = base.clone();
+            tag.fields.retain(|(key, _)| *key != "id");
+            drawing.tag = joined(&tag, &drawing.tag);
+        }
+    }
+}
+
+fn tag_body_block(blocks: &mut [Block], base: &Ref, sdt: bool) {
+    let mut paragraph_index = 0;
+    for block in blocks {
+        match block {
+            Block::Paragraph(paragraph) => {
+                let tag = if sdt { base.clone().int("paragraph", paragraph_index) } else { base.clone() };
+                paragraph_index += 1;
+                tag_paragraph(paragraph, &tag);
+            }
+            Block::Table(table) => tag_table(table, base),
+            Block::Columns(_) => {}
+        }
+    }
+}
+
+fn tag_table(table: &mut Table, base: &Ref) {
+    let first_id = |blocks: &mut Vec<Block>| {
+        let mut paragraphs = Vec::new();
+        collect_paragraphs(blocks, &mut paragraphs);
+        paragraphs.first().and_then(|p| p.tag.fields.iter().find(|(k, _)| *k == "id").map(|(_, v)| v.clone()))
+    };
+    let mut table_id = None;
+    for (row_index, row) in table.rows.iter_mut().enumerate() {
+        for (column, cell) in row.cells.iter_mut().enumerate() {
+            let id = first_id(&mut cell.blocks);
+            table_id = table_id.or(id.clone());
+            let mut tag = base.clone().int("row", row_index as i64).int("column", column as i64);
+            tag.fields.retain(|(key, _)| *key != "id");
+            let mut paragraphs = Vec::new();
+            collect_paragraphs(&mut cell.blocks, &mut paragraphs);
+            for (index, paragraph) in paragraphs.into_iter().enumerate() {
+                tag_paragraph(paragraph, &tag.clone().int("paragraph", index as i64));
+            }
+            if let Some(id) = id {
+                tag.set("id", id);
+            }
+            cell.tag = tag;
+        }
+    }
+    let mut tag = base.clone();
+    if let Some(id) = table_id {
+        tag.set("id", id);
+    }
+    table.tag = tag;
+}
+
+fn collect_paragraphs<'a>(blocks: &'a mut [Block], out: &mut Vec<&'a mut Paragraph>) {
+    for block in blocks {
+        match block {
+            Block::Paragraph(paragraph) => out.push(paragraph),
+            Block::Table(table) => {
+                for row in &mut table.rows {
+                    for cell in &mut row.cells {
+                        collect_paragraphs(&mut cell.blocks, out);
+                    }
+                }
+            }
+            Block::Columns(columns) => collect_paragraphs(&mut columns.blocks, out),
+        }
+    }
+}
+
 #[derive(Default)]
 struct FieldState {
     depth: usize,
     instr: String,
     skipping: bool,
+    offset: u32,
+    offsets: Vec<u32>,
+}
+
+fn engine_length(child: &Element) -> u32 {
+    match child.name.as_str() {
+        "t" => child.text().encode_utf16().count() as u32,
+        "tab" | "cr" | "noBreakHyphen" => 1,
+        "br" => u32::from(child.attr("type") != Some("page")),
+        _ => 0,
+    }
+}
+
+fn text_length(el: &Element) -> u32 {
+    el.elements()
+        .map(|child| match child.name.as_str() {
+            "r" => child.elements().map(engine_length).sum(),
+            "hyperlink" | "smartTag" | "ins" | "customXml" | "dir" | "bdo" | "sdt" | "sdtContent" | "moveTo" | "fldSimple" => text_length(child),
+            _ => 0,
+        })
+        .sum()
 }
 
 fn field_kind(instr: &str) -> Option<FieldKind> {

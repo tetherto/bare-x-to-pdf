@@ -24,6 +24,19 @@ sc_convert(
   sc_buffer_t *error
 );
 
+int
+sc_convert_with(
+  const uint8_t *input,
+  size_t input_len,
+  const char *from,
+  const char *to,
+  const char *fonts_dir,
+  const char *request,
+  sc_buffer_t *out,
+  sc_buffer_t *meta,
+  sc_buffer_t *error
+);
+
 void
 sc_free(sc_buffer_t *buffer);
 

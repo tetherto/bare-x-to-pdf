@@ -7,6 +7,8 @@ test('document MIME types', (t) => {
   t.ok(
     isMimeTypeSupported('application/vnd.openxmlformats-officedocument.presentationml.presentation')
   )
+  t.ok(isMimeTypeSupported('application/vnd.openxmlformats-officedocument.presentationml.template'))
+  t.ok(isMimeTypeSupported('application/vnd.ms-powerpoint.presentation.macroenabled.12'))
   t.absent(isMimeTypeSupported('application/vnd.ms-powerpoint'))
   t.absent(isMimeTypeSupported('application/octet-stream'))
   t.absent(isMimeTypeSupported('docx'))

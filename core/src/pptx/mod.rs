@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 pub(crate) mod color;
 pub(crate) mod text;
 
@@ -27,9 +28,14 @@ pub fn read(bytes: &[u8]) -> Result<Document, Error> {
     let height = size.and_then(|s| s.attr("cy")).and_then(emu).unwrap_or(540.0);
 
     let pres_rels = package.rels("ppt/presentation.xml")?;
-    let slide_ids: Vec<String> = presentation
+    let slide_ids: Vec<(usize, Option<i64>, String)> = presentation
         .child("sldIdLst")
-        .map(|l| l.children("sldId").filter_map(|s| s.attr("r:id").map(str::to_owned)).collect())
+        .map(|l| {
+            l.children("sldId")
+                .enumerate()
+                .filter_map(|(index, s)| Some((index, s.attr("id").and_then(|id| id.trim().parse().ok()), s.attr("r:id")?.to_owned())))
+                .collect()
+        })
         .unwrap_or_default();
 
     let default_theme = Theme::default();
@@ -46,12 +52,13 @@ pub fn read(bytes: &[u8]) -> Result<Document, Error> {
     let mut doc = Document {
         default_tab: 72.0,
         fixed_line_metrics: true,
+        page_per_section: true,
         ..Document::default()
     };
 
     let mut number = 0;
     let mut seen_targets = std::collections::HashSet::new();
-    for id in slide_ids {
+    for (index, slide_id, id) in slide_ids {
         let Some((_, target)) = pres_rels.get(&id) else { continue };
         if !seen_targets.insert(target.clone()) {
             continue;
@@ -61,7 +68,12 @@ pub fn read(bytes: &[u8]) -> Result<Document, Error> {
             continue;
         }
         number += 1;
-        let section = render_slide(&mut package, target, &slide, number, width, height, &default_text)?;
+        let mut base = Ref::new().int("slide", index as i64);
+        if let Some(slide_id) = slide_id {
+            base = base.int("slideId", slide_id);
+        }
+        let mut section = render_slide(&mut package, target, &slide, number, width, height, &default_text, &base)?;
+        section.tag = base.kind("slide");
         doc.sections.push(section);
     }
     if doc.sections.is_empty() {
@@ -422,8 +434,11 @@ struct SlideCtx<'a> {
     slide_number: usize,
     page_width: f64,
     page_height: f64,
+    base: Ref,
+    regions: Option<&'a RefCell<Vec<Region>>>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_slide(
     package: &mut Package,
     slide_path: &str,
@@ -432,7 +447,9 @@ fn render_slide(
     width: f64,
     height: f64,
     default_text: &LevelStyles,
+    base: &Ref,
 ) -> Result<Section, Error> {
+    let inherited = base.clone().flag("inherited");
     let slide_rels = package.rels(slide_path)?;
     let layout_path = slide_rels
         .values()
@@ -474,7 +491,7 @@ fn render_slide(
 
     let master = master_xml
         .as_ref()
-        .map(|m| parse_master(m, &theme, &master_media, default_text, number, width, height));
+        .map(|m| parse_master(m, &theme, &master_media, default_text, number, width, height, &inherited));
     let empty_levels = LevelStyles::default();
     let (clr_map, title_style, body_style, other_style, master_placeholders, master_shapes, master_bg) = match &master {
         Some(m) => (
@@ -523,9 +540,12 @@ fn render_slide(
             slide_number: number,
             page_width: width,
             page_height: height,
+            base: inherited.clone(),
+            regions: None,
         };
         parse_layout(l, &ctx)
     });
+    let regions = RefCell::new(Vec::new());
 
     let ctx = SlideCtx {
         theme: &theme,
@@ -541,6 +561,8 @@ fn render_slide(
         slide_number: number,
         page_width: width,
         page_height: height,
+        base: base.clone(),
+        regions: Some(&regions),
     };
 
     let mut anchors: Vec<Anchor> = Vec::new();
@@ -578,10 +600,12 @@ fn render_slide(
         })],
         columns: 1,
         column_gap: 0.0,
+        regions: regions.into_inner(),
         ..Section::default()
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn parse_master(
     master: &Element,
     theme: &Theme,
@@ -590,6 +614,7 @@ fn parse_master(
     number: usize,
     width: f64,
     height: f64,
+    base: &Ref,
 ) -> MasterPart {
     let clr_map = master.child("clrMap").map(parse_clr_map).unwrap_or_else(color::default_clr_map);
     let colors = ColorContext { theme, clr_map: &clr_map, placeholder: None };
@@ -629,6 +654,8 @@ fn parse_master(
         slide_number: number,
         page_width: width,
         page_height: height,
+        base: base.clone(),
+        regions: None,
     };
     part.background = master.child("cSld").and_then(|c| c.child("bg")).and_then(|bg| background(bg, &ctx));
     if let Some(tree) = master.child("cSld").and_then(|c| c.child("spTree")) {
@@ -685,6 +712,7 @@ pub(crate) fn page_anchor(x: f64, y: f64, w: f64, h: f64, content: DrawingConten
             rotation: rot,
             flip_h,
             flip_v,
+            tag: Ref::default(),
         },
         horizontal: HPosition::Offset(HRef::Page, x),
         vertical: VPosition::Offset(VRef::Page, y),
@@ -832,13 +860,28 @@ fn collect_shapes(
     placeholders: &mut Vec<Placeholder>,
 ) {
     for el in tree.elements() {
+        let before = out.len();
         match el.name.as_str() {
             "sp" => shape(el, transform, ctx, render_placeholders, out, placeholders),
             "pic" => picture(el, transform, ctx, out),
             "cxnSp" => connector(el, transform, ctx, out),
             "grpSp" => {
+                if is_hidden(el, "nvGrpSpPr") {
+                    continue;
+                }
+                if let (Some(regions), Some(id), Some(xfrm)) = (ctx.regions, shape_id(el), parse_xfrm(el.child("grpSpPr"))) {
+                    let placed = transform.apply(xfrm);
+                    regions.borrow_mut().push(Region {
+                        tag: ctx.base.clone().int("shape", id).kind("shape"),
+                        x: placed.x,
+                        y: placed.y,
+                        width: placed.w,
+                        height: placed.h,
+                    });
+                }
                 let child = transform.child(el);
                 collect_shapes(el, &child, ctx, render_placeholders, out, placeholders);
+                continue;
             }
             "graphicFrame" => graphic_frame(el, transform, ctx, out),
             "AlternateContent" => {
@@ -850,6 +893,43 @@ fn collect_shapes(
             }
             _ => {}
         }
+        if let Some(id) = shape_id(el) {
+            let tag = ctx.base.clone().int("shape", id);
+            for anchor in &mut out[before..] {
+                tag_drawing(&mut anchor.drawing, &tag);
+            }
+        }
+    }
+}
+
+fn shape_id(el: &Element) -> Option<i64> {
+    el.elements().next()?.child("cNvPr")?.attr("id")?.trim().parse().ok()
+}
+
+fn tag_drawing(drawing: &mut Drawing, tag: &Ref) {
+    drawing.tag = tag.clone();
+    let tag_paragraphs = |blocks: &mut [Block], base: &Ref| {
+        let mut index = 0;
+        for block in blocks {
+            if let Block::Paragraph(paragraph) = block {
+                paragraph.tag = base.clone().int("paragraph", index);
+                index += 1;
+            }
+        }
+    };
+    match &mut drawing.content {
+        DrawingContent::TextBox(text_box) => tag_paragraphs(&mut text_box.blocks, tag),
+        DrawingContent::Table(table) => {
+            for row in &mut table.rows {
+                for cell in &mut row.cells {
+                    let mut cell_tag = tag.clone();
+                    cell_tag.fields.extend(cell.tag.fields.iter().cloned());
+                    tag_paragraphs(&mut cell.blocks, &cell_tag);
+                    cell.tag = cell_tag;
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -1015,6 +1095,15 @@ fn shape(
         _ => false,
     });
     if !has_text && shape_fill.is_none() && stroke.is_none() {
+        if let (Some(regions), Some(id)) = (ctx.regions, shape_id(el)) {
+            regions.borrow_mut().push(Region {
+                tag: ctx.base.clone().int("shape", id).kind("shape"),
+                x: placed.x,
+                y: placed.y,
+                width: placed.w,
+                height: placed.h,
+            });
+        }
         return;
     }
 
@@ -1059,7 +1148,24 @@ fn picture(el: &Element, transform: &Transform, ctx: &SlideCtx, out: &mut Vec<An
     if is_hidden(el, "nvPicPr") {
         return;
     }
-    let Some(xfrm) = parse_xfrm(el.child("spPr")) else { return };
+    let Some(xfrm) = parse_xfrm(el.child("spPr")) else {
+        let inherited = placeholder_of(el, "nvPicPr").and_then(|(kind, idx)| {
+            find_placeholder(ctx.layout_placeholders, &kind, idx.as_deref())
+                .or_else(|| find_placeholder(ctx.master_placeholders, &kind, idx.as_deref()))
+                .and_then(|p| p.xfrm)
+        });
+        if let (Some(regions), Some(id), Some(xfrm)) = (ctx.regions, shape_id(el), inherited) {
+            let placed = transform.apply(xfrm);
+            regions.borrow_mut().push(Region {
+                tag: ctx.base.clone().int("shape", id).kind("image"),
+                x: placed.x,
+                y: placed.y,
+                width: placed.w,
+                height: placed.h,
+            });
+        }
+        return;
+    };
     let placed = transform.apply(xfrm);
     let image = el
         .child("blipFill")
@@ -1144,13 +1250,14 @@ fn parse_table(tbl: &Element, ctx: &SlideCtx) -> Table {
             ..Row::default()
         };
         let header = first_row && ri == 0;
-        for tc in tr.children("tc") {
+        for (ci, tc) in tr.children("tc").enumerate() {
             if tc.attr("hMerge") == Some("1") {
                 continue;
             }
             let tc_pr = tc.child("tcPr");
             let mut cell = Cell {
                 span: tc.attr("gridSpan").and_then(|v| v.parse().ok()).map_or(1, crate::limits::span),
+                tag: Ref::new().int("row", ri as i64).int("column", ci as i64),
                 ..Cell::default()
             };
             if tc.attr("vMerge") == Some("1") {
@@ -1350,16 +1457,4 @@ enum TableLook {
 fn tint(c: Color, amount: f64) -> Color {
     let mix = |x: u8| (x as f64 + (255.0 - x as f64) * amount).round() as u8;
     Color(mix(c.0), mix(c.1), mix(c.2))
-}
-
-impl Default for Paragraph {
-    fn default() -> Self {
-        Paragraph {
-            props: ParagraphProps::default(),
-            mark: RunProps::default(),
-            inlines: Vec::new(),
-            anchors: Vec::new(),
-            list: None,
-        }
-    }
 }
