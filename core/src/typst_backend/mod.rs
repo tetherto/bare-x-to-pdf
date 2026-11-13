@@ -1,6 +1,8 @@
+mod chunks;
 pub mod emit;
 pub mod fonts;
 mod images;
+mod merge;
 mod notes;
 pub mod world;
 
@@ -22,24 +24,23 @@ pub fn render_pdf(mut document: Document, fonts_dir: &Path) -> Result<Vec<u8>, E
     if let Ok(path) = std::env::var("SIMPLE_CONVERTER_DUMP_TYPST") {
         let _ = std::fs::write(path, &emitted.source);
     }
-    if let Ok(path) = std::env::var("SIMPLE_CONVERTER_LOAD_TYPST") {
+    let loaded = std::env::var("SIMPLE_CONVERTER_LOAD_TYPST").ok();
+    if let Some(path) = &loaded {
         emitted.source = std::fs::read_to_string(path).map_err(|e| Error::new(format!("cannot read typst source: {e}")))?;
     }
     crate::limits::check_layout_source(emitted.source.len())?;
 
-    let mut world = ConverterWorld::new(emitted.source, fonts);
-    for (path, data) in emitted.files {
-        world.add_file(&path, data)?;
-    }
-    let compiled = typst::compile::<PagedDocument>(&world);
-    let paged = compiled
-        .output
-        .map_err(|errors| Error::new(format!("layout failed: {}", diagnostics(&errors))))?;
-
-    let mut pdf = typst_pdf::pdf(&paged, &PdfOptions::default())
-        .map_err(|errors| Error::new(format!("pdf export failed: {}", diagnostics(&errors))))?;
-
     let has_notes = doc.sections.iter().any(|s| !s.notes.is_empty());
+    if loaded.is_none() && !has_notes && emitted.source.len() > chunks::CHUNK_SOURCE_BYTES {
+        let block_sizes = std::mem::take(&mut emitted.block_sizes);
+        let uses_total_pages = emitted.uses_total_pages;
+        drop(emitted);
+        return chunks::render(doc, &fonts, &block_sizes, uses_total_pages);
+    }
+
+    let paged = layout(emitted, fonts)?;
+    let mut pdf = export(&paged, &PdfOptions::default())?;
+
     if has_notes && paged.pages().len() == doc.sections.len() {
         let pages: Vec<(f64, &[crate::model::PageNote])> =
             doc.sections.iter().map(|s| (s.page.height, s.notes.as_slice())).collect();
@@ -48,6 +49,20 @@ pub fn render_pdf(mut document: Document, fonts_dir: &Path) -> Result<Vec<u8>, E
 
     typst::comemo::evict(0);
     Ok(pdf)
+}
+
+fn layout(emitted: emit::Emitted, fonts: FontSet) -> Result<PagedDocument, Error> {
+    let mut world = ConverterWorld::new(emitted.source, fonts);
+    for (path, data) in emitted.files {
+        world.add_file(&path, data)?;
+    }
+    typst::compile::<PagedDocument>(&world)
+        .output
+        .map_err(|errors| Error::new(format!("layout failed: {}", diagnostics(&errors))))
+}
+
+fn export(paged: &PagedDocument, options: &PdfOptions) -> Result<Vec<u8>, Error> {
+    typst_pdf::pdf(paged, options).map_err(|errors| Error::new(format!("pdf export failed: {}", diagnostics(&errors))))
 }
 
 fn diagnostics(errors: &[SourceDiagnostic]) -> String {

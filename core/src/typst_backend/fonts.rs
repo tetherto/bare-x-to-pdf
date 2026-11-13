@@ -10,6 +10,7 @@ const SANS: &str = "Liberation Sans";
 const SERIF: &str = "Liberation Serif";
 const MONO: &str = "Liberation Mono";
 
+#[derive(Clone)]
 pub struct FontSet {
     pub fonts: Vec<Font>,
     pub book: LazyHash<FontBook>,
