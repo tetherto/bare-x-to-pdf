@@ -389,7 +389,7 @@ fn read_table(table: &Element, odf: &OdfStyles, formats: &mut Formats, pkg: &Pac
         let repeats = if has_content || !template.cells.is_empty() { count.min(4096) } else { count };
         materialised += template.cells.len() as u64 * u64::from(repeats);
         if materialised > crate::limits::MAX_SHEET_CELLS {
-            return Err(Error::new(format!("the spreadsheet is too large to convert: more than {} cells", crate::limits::MAX_SHEET_CELLS)));
+            return Err(Error::limit(format!("the spreadsheet is too large to convert: more than {} cells", crate::limits::MAX_SHEET_CELLS)));
         }
         if !template.cells.is_empty() || height.is_some() || hidden {
             for k in 0..repeats.min(if template.cells.is_empty() { 1 } else { repeats }) {

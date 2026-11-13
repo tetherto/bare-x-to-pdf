@@ -168,8 +168,8 @@ The cost of shipping it in the main package is size: every install gets the 25.8
 
 ## Isolation
 
-A 225 KB `.docx` with 400,000 short paragraphs (`many-paras.docx`, not yet in
-`test/fixtures/hostile`):
+A 225 KB `.docx` with 400,000 short paragraphs (`many-paras.docx`), measured before the
+content-volume limits:
 
 | build             | result                                                              |
 | ----------------- | ------------------------------------------------------------------- |
@@ -212,8 +212,9 @@ Panics: stable `wasm32-wasip1` is `panic=abort`, so the `catch_unwind` in `sc_co
 inert. A panic becomes a trap (`unreachable`) instead of the "internal error" message,
 and kills the instance like any other trap.
 
-Separately, the core needs a content-volume limit (paragraphs or pages), since
-`many-paras.docx` takes down every native build today.
+The core now rejects documents with too much content before laying them out (see "Limits"
+in the README). `test/fixtures/hostile/many-paragraphs.docx`, also 400,000 paragraphs,
+fails natively with "document is too large to convert" in 0.3 s at about 420 MB.
 
 ## 32-bit
 

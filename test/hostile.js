@@ -17,6 +17,8 @@ const REJECTED = {
   'deep-unknown-elements.pptx': /nested/,
   'nested-tables-2000.docx': /nested/,
   'dense-cells.xlsx': /too large/,
+  'many-paragraphs.docx': /too large to convert/,
+  'text-volume-huge.docx': /too large to convert/,
   'ods-repeated-cells.ods': /too large/
 }
 
@@ -30,13 +32,39 @@ for (const name of cases) {
     const from = name.endsWith('.md') ? 'md' : undefined
     const pending = converter.convert(hostile(name), { from, to: 'pdf' })
     if (REJECTED[name]) {
-      await t.exception(pending, REJECTED[name])
+      const err = await pending.then(
+        () => null,
+        (err) => err
+      )
+      t.ok(err, 'rejected')
+      t.ok(REJECTED[name].test(err.message), err.message)
+      t.is(err.code, 'LIMIT')
     } else {
       const pdf = await pending
       t.is(pdf.subarray(0, 5).toString(), '%PDF-')
     }
   })
 }
+
+test('errors that are not limits carry no LIMIT code', async (t) => {
+  const err = await converter
+    .convert(Buffer.from('PK\x03\x04garbage'), { from: 'docx', to: 'pdf' })
+    .then(
+      () => null,
+      (err) => err
+    )
+  t.ok(err, 'rejected')
+  t.not(err.code, 'LIMIT')
+})
+
+test('convertSync sets the LIMIT code too', (t) => {
+  try {
+    converter.convertSync(hostile('many-paragraphs.docx'), { to: 'pdf' })
+    t.fail('converted')
+  } catch (err) {
+    t.is(err.code, 'LIMIT')
+  }
+})
 
 test('rejects option values that are not strings', async (t) => {
   for (const fontsDir of [123, true, new String(converter.FONTS_DIR), {}, [converter.FONTS_DIR]]) {

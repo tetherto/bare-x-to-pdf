@@ -8,6 +8,14 @@
 extern "C" {
 #endif
 
+enum {
+  SC_STATUS_OK = 0,
+  SC_STATUS_ERROR = 1,
+  SC_STATUS_PANIC = 2,
+  SC_STATUS_INVALID = 3,
+  SC_STATUS_LIMIT = 4,
+};
+
 typedef struct {
   uint8_t *data;
   size_t len;

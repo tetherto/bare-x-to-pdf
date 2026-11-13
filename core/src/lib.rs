@@ -157,7 +157,11 @@ pub unsafe extern "C" fn sc_convert(
         }
         Ok(Err(e)) => {
             *error = Buffer::from_vec(e.message().as_bytes().to_vec());
-            1
+            if e.is_limit() {
+                4
+            } else {
+                1
+            }
         }
         Err(payload) => {
             let message = payload

@@ -1186,7 +1186,7 @@ fn paginate(sheet: &Sheet, name: &str, styles: &Styles, cells: &mut u64) -> Resu
     for (rg, cg) in &order {
         *cells += (rg.len() * cg.len()) as u64;
         if *cells > crate::limits::MAX_SHEET_CELLS {
-            return Err(Error::new(format!("the spreadsheet is too large to convert: more than {} cells to print", crate::limits::MAX_SHEET_CELLS)));
+            return Err(Error::limit(format!("the spreadsheet is too large to convert: more than {} cells to print", crate::limits::MAX_SHEET_CELLS)));
         }
     }
 

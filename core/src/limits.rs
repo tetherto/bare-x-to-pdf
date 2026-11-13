@@ -2,6 +2,7 @@ use crate::error::Error;
 use std::io::Read;
 
 pub const MAX_XML_DEPTH: usize = 512;
+pub const MAX_XML_ELEMENTS: usize = 1_000_000;
 pub const MAX_FORMULA_DEPTH: usize = 256;
 pub const MAX_ZIP_ENTRY_BYTES: u64 = 128 * 1024 * 1024;
 pub const MAX_TABLE_SPAN: usize = 1000;
@@ -19,6 +20,19 @@ pub const MAX_SHEET_CELLS: u64 = 30_000;
 pub const MIN_PAGE_SIDE: f64 = 72.0;
 pub const MAX_PAGE_SIDE: f64 = 14_400.0;
 pub const MAX_LENGTH: f64 = 1_000_000.0;
+pub const MAX_LAYOUT_SOURCE_BYTES: usize = 8 * 1024 * 1024;
+
+pub fn check_layout_source(bytes: usize) -> Result<(), Error> {
+    if bytes > MAX_LAYOUT_SOURCE_BYTES {
+        let mb = |n: usize| n.div_ceil(1024 * 1024);
+        return Err(Error::limit(format!(
+            "document is too large to convert: its content needs {} MB of layout source, more than the {} MB limit",
+            mb(bytes),
+            mb(MAX_LAYOUT_SOURCE_BYTES)
+        )));
+    }
+    Ok(())
+}
 
 pub fn span(value: usize) -> usize {
     value.clamp(1, MAX_TABLE_SPAN)
@@ -36,7 +50,7 @@ pub fn read_entry(reader: impl Read) -> Result<Vec<u8>, Error> {
     let mut data = Vec::new();
     reader.take(MAX_ZIP_ENTRY_BYTES + 1).read_to_end(&mut data)?;
     if data.len() as u64 > MAX_ZIP_ENTRY_BYTES {
-        return Err(Error::new(format!("a part of the document is larger than {} MB uncompressed", MAX_ZIP_ENTRY_BYTES / (1024 * 1024))));
+        return Err(Error::limit(format!("a part of the document is larger than {} MB uncompressed", MAX_ZIP_ENTRY_BYTES / (1024 * 1024))));
     }
     Ok(data)
 }

@@ -196,8 +196,14 @@ simple_converter__error(js_env_t *env, simple_converter_job_t *job) {
   }
   assert(err == 0);
 
+  js_value_t *code = NULL;
+  if (job->status == SC_STATUS_LIMIT) {
+    err = js_create_string_utf8(env, (utf8_t *) "LIMIT", (size_t) -1, &code);
+    assert(err == 0);
+  }
+
   js_value_t *error;
-  err = js_create_error(env, NULL, message, &error);
+  err = js_create_error(env, code, message, &error);
   assert(err == 0);
 
   return error;
