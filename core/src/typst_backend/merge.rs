@@ -79,12 +79,32 @@ pub fn merge(pdfs: &[Vec<u8>]) -> Result<Vec<u8>, Error> {
 }
 
 #[cfg(test)]
-pub fn page_count(pdf: &[u8]) -> Result<usize, Error> {
+pub fn check(pdf: &[u8]) -> Result<usize, Error> {
     let parsed = parse(pdf)?;
+    let referenced = std::cell::RefCell::new(Vec::new());
+    for (start, end) in parsed.spans.iter().flatten().copied() {
+        let object = &pdf[start..end];
+        let body_at = find(object, b"obj").ok_or_else(broken)? + 3;
+        rewrite(
+            &object[body_at..],
+            &|id| {
+                referenced.borrow_mut().push(id);
+                id
+            },
+            &mut Vec::new(),
+        );
+    }
+    for id in referenced.into_inner() {
+        if parsed.spans.get(id).copied().flatten().is_none() {
+            return Err(Error::new(format!("dangling reference to object {id}")));
+        }
+    }
+    let parent = format!("/Parent {} 0 R", parsed.pages);
     for &kid in &parsed.kids {
         let (start, end) = parsed.spans.get(kid).copied().flatten().ok_or_else(broken)?;
-        if find(&pdf[start..end], b"/Type/Page").is_none() {
-            return Err(broken());
+        let page = &pdf[start..end];
+        if find(page, b"/Type/Page").is_none() || find(page, parent.as_bytes()).is_none() {
+            return Err(Error::new(format!("page object {kid} is not a child of the page tree")));
         }
     }
     Ok(parsed.kids.len())

@@ -174,9 +174,9 @@ mod tests {
 
     const BUDGET: usize = 16 * 1024;
 
-    fn fixture() -> (Document, FontSet) {
+    fn fixture(name: &str) -> (Document, FontSet) {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-        let bytes = std::fs::read(root.join("test/fixtures/chunked-sections.docx")).unwrap();
+        let bytes = std::fs::read(root.join("test/fixtures").join(name)).unwrap();
         let mut doc = crate::docx::read(&bytes).unwrap();
         super::super::sanitize_pages(&mut doc);
         (doc, FontSet::load(&root.join("fonts")).unwrap())
@@ -199,37 +199,77 @@ mod tests {
         out
     }
 
-    #[test]
-    fn chunked_layout_matches_a_single_pass() {
-        let (doc, fonts) = fixture();
+    fn chunked_pages(name: &str) -> (Vec<String>, Vec<Vec<String>>) {
+        let (doc, fonts) = fixture(name);
         let full = emit::emit(&doc, &fonts);
         let sizes = full.block_sizes.clone();
         let uses_total_pages = full.uses_total_pages;
-        assert!(uses_total_pages);
-        let single: Vec<String> = layout(full, fonts.clone()).unwrap().pages().iter().map(page_text).collect();
-
-        let mut chunked = Vec::new();
-        let mut chunks = 0;
+        let single = layout(full, fonts.clone()).unwrap().pages().iter().map(page_text).collect();
+        let mut chunks = Vec::new();
         paginate(&doc, &fonts, &sizes, uses_total_pages, BUDGET, &mut |paged, keep| {
-            chunks += 1;
-            chunked.extend(paged.pages()[..keep].iter().map(page_text));
+            chunks.push(paged.pages()[..keep].iter().map(page_text).collect());
             Ok(())
         })
         .unwrap();
+        (single, chunks)
+    }
 
-        assert!(chunks >= 8, "only {chunks} chunks");
+    fn assert_same_pages(single: &[String], chunks: &[Vec<String>]) {
+        let chunked: Vec<&String> = chunks.iter().flatten().collect();
         assert_eq!(chunked.len(), single.len());
-        for (index, (a, b)) in chunked.iter().zip(&single).enumerate() {
-            assert_eq!(a, b, "page {}", index + 1);
+        for (index, (a, b)) in chunked.iter().zip(single).enumerate() {
+            assert_eq!(*a, b, "page {}", index + 1);
         }
     }
 
     #[test]
-    fn merged_pdf_keeps_every_page() {
-        let (doc, fonts) = fixture();
-        let full = emit::emit(&doc, &fonts);
-        let pages = layout(emit::emit(&doc, &fonts), fonts.clone()).unwrap().pages().len();
-        let pdf = render_in_chunks(&doc, &fonts, &full.block_sizes, full.uses_total_pages, BUDGET).unwrap();
-        assert_eq!(merge::page_count(&pdf).unwrap(), pages);
+    fn chunked_layout_matches_a_single_pass() {
+        let (doc, fonts) = fixture("chunked-sections.docx");
+        assert!(emit::emit(&doc, &fonts).uses_total_pages);
+        let (single, chunks) = chunked_pages("chunked-sections.docx");
+        assert!(chunks.len() >= 8, "only {} chunks", chunks.len());
+        assert_same_pages(&single, &chunks);
+    }
+
+    #[test]
+    fn chunks_never_end_inside_columns_or_a_table() {
+        let (single, chunks) = chunked_pages("chunked-no-cut.docx");
+        assert!(chunks.len() >= 3, "only {} chunks", chunks.len());
+        assert_same_pages(&single, &chunks);
+        let block_starts = ["Opening paragraph", "End of", "Columns paragraph 0:", "row 0 cell 0", "Closing paragraph"];
+        for chunk in &chunks[1..] {
+            let first = chunk[0].split_once('|').map_or("", |(text, _)| text);
+            assert!(block_starts.iter().any(|start| first.contains(start)), "a chunk starts inside a block: {first}");
+        }
+        let longest = chunks.iter().map(Vec::len).max().unwrap();
+        let table_pages = single.iter().filter(|page| page.contains("row ")).count();
+        assert!(longest >= table_pages, "the table was split across chunks");
+    }
+
+    #[test]
+    fn merged_pdf_is_well_formed() {
+        for name in ["chunked-sections.docx", "chunked-no-cut.docx"] {
+            let (doc, fonts) = fixture(name);
+            let full = emit::emit(&doc, &fonts);
+            let pages = layout(emit::emit(&doc, &fonts), fonts.clone()).unwrap().pages().len();
+            let pdf = render_in_chunks(&doc, &fonts, &full.block_sizes, full.uses_total_pages, BUDGET).unwrap();
+            assert_eq!(merge::check(&pdf).unwrap(), pages, "{name}");
+        }
+    }
+
+    #[test]
+    fn typst_pdfs_have_the_structure_merge_expects() {
+        let (doc, fonts) = fixture("chunked-sections.docx");
+        let paged = layout(emit::emit(&doc, &fonts), fonts).unwrap();
+        for tagged in [true, false] {
+            let options = PdfOptions {
+                tagged,
+                ..PdfOptions::default()
+            };
+            let pdf = export(&paged, &options).unwrap();
+            assert_eq!(merge::check(&pdf).unwrap(), paged.pages().len());
+            let doubled = merge::merge(&[pdf.clone(), pdf]).unwrap();
+            assert_eq!(merge::check(&doubled).unwrap(), 2 * paged.pages().len());
+        }
     }
 }

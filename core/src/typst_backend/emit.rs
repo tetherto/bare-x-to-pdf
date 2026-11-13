@@ -58,6 +58,7 @@ fn run(doc: &Document, fonts: &FontSet, parts: &[(usize, std::ops::Range<usize>)
         block_sizes: RefCell::new(Vec::new()),
         uses_total_pages: Cell::new(false),
         drop_leading_gap: Cell::new(chunk.is_some_and(|c| c.resumed)),
+        multi_column: false,
     };
     emitter.preamble();
     for (position, (index, range)) in parts.iter().enumerate() {
@@ -85,6 +86,7 @@ struct Emitter<'a> {
     block_sizes: RefCell<Vec<Vec<usize>>>,
     uses_total_pages: Cell<bool>,
     drop_leading_gap: Cell<bool>,
+    multi_column: bool,
 }
 
 struct CellOut {
@@ -130,11 +132,12 @@ impl Emitter<'_> {
         let header = self.margin_slot(section, true, index, continued);
         let footer = self.margin_slot(section, false, index, continued);
         let section_columns = section.columns.min(crate::limits::MAX_TEXT_COLUMNS);
-        let columns = if section_columns > 1 {
+        let columns = if section_columns > 1 || self.multi_column {
             format!(", columns: {section_columns}")
         } else {
             String::new()
         };
+        self.multi_column = section_columns > 1;
         let _ = writeln!(
             self.out,
             "#set page(width: {}, height: {}, margin: (top: {}, bottom: {}, left: {}, right: {}){columns}, header: {header}, footer: {footer}, header-ascent: 0pt, footer-descent: 0pt)",
