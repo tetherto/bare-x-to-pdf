@@ -28,7 +28,6 @@ pub fn render_pdf(mut document: Document, fonts_dir: &Path) -> Result<Vec<u8>, E
 
     let mut world = ConverterWorld::new(emitted.source, fonts);
     for (path, data) in emitted.files {
-        let data = images::sanitize(&path, data);
         world.add_file(&path, data)?;
     }
     let compiled = typst::compile::<PagedDocument>(&world);
