@@ -64,9 +64,20 @@ pub fn parse(bytes: &[u8]) -> Result<Element, Error> {
         name: String::from("#document"),
         ..Element::default()
     }];
+    let mut elements: usize = 0;
 
     loop {
-        match reader.read_event()? {
+        let event = reader.read_event()?;
+        if matches!(event, Event::Start(_) | Event::Empty(_)) {
+            elements += 1;
+            if elements > crate::limits::MAX_XML_ELEMENTS {
+                return Err(Error::new(format!(
+                    "document is too large to convert: a part has more than {} XML elements",
+                    crate::limits::MAX_XML_ELEMENTS
+                )));
+            }
+        }
+        match event {
             Event::Start(start) => {
                 if stack.len() > crate::limits::MAX_XML_DEPTH {
                     return Err(Error::new(format!("xml: elements are nested more than {} levels deep", crate::limits::MAX_XML_DEPTH)));

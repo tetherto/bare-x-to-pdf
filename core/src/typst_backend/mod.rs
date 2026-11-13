@@ -25,6 +25,7 @@ pub fn render_pdf(mut document: Document, fonts_dir: &Path) -> Result<Vec<u8>, E
     if let Ok(path) = std::env::var("SIMPLE_CONVERTER_LOAD_TYPST") {
         emitted.source = std::fs::read_to_string(path).map_err(|e| Error::new(format!("cannot read typst source: {e}")))?;
     }
+    crate::limits::check_layout_source(emitted.source.len())?;
 
     let mut world = ConverterWorld::new(emitted.source, fonts);
     for (path, data) in emitted.files {

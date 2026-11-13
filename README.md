@@ -135,6 +135,9 @@ Rejected:
 
 - An archive part larger than 128 MB uncompressed.
 - XML nested more than 512 elements deep.
+- An XML part with more than 1,000,000 elements.
+- A document whose content needs more than 8 MB of Typst source to lay out, about 1,000
+  pages of dense text.
 - A spreadsheet that would print more than 30,000 cells.
 
 Clamped:

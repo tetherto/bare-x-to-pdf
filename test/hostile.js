@@ -17,6 +17,8 @@ const REJECTED = {
   'deep-unknown-elements.pptx': /nested/,
   'nested-tables-2000.docx': /nested/,
   'dense-cells.xlsx': /too large/,
+  'many-paragraphs.docx': /too large to convert/,
+  'text-volume-huge.docx': /too large to convert/,
   'ods-repeated-cells.ods': /too large/
 }
 
