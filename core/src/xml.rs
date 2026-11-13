@@ -71,7 +71,7 @@ pub fn parse(bytes: &[u8]) -> Result<Element, Error> {
         if matches!(event, Event::Start(_) | Event::Empty(_)) {
             elements += 1;
             if elements > crate::limits::MAX_XML_ELEMENTS {
-                return Err(Error::new(format!(
+                return Err(Error::limit(format!(
                     "document is too large to convert: a part has more than {} XML elements",
                     crate::limits::MAX_XML_ELEMENTS
                 )));
@@ -80,7 +80,7 @@ pub fn parse(bytes: &[u8]) -> Result<Element, Error> {
         match event {
             Event::Start(start) => {
                 if stack.len() > crate::limits::MAX_XML_DEPTH {
-                    return Err(Error::new(format!("xml: elements are nested more than {} levels deep", crate::limits::MAX_XML_DEPTH)));
+                    return Err(Error::limit(format!("xml: elements are nested more than {} levels deep", crate::limits::MAX_XML_DEPTH)));
                 }
                 stack.push(element(&start)?)
             }

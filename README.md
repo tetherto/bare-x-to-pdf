@@ -131,7 +131,8 @@ Documents are often untrusted, so the engine caps what a small file can make it 
 lay out. A document past a hard limit is rejected with an error. One past a soft limit still
 converts, with the value clamped.
 
-Rejected:
+Rejected, with `err.code` set to `'LIMIT'` so an app can tell these apart from a damaged
+file:
 
 - An archive part larger than 128 MB uncompressed.
 - XML nested more than 512 elements deep.

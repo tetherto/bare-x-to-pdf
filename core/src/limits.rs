@@ -25,7 +25,7 @@ pub const MAX_LAYOUT_SOURCE_BYTES: usize = 8 * 1024 * 1024;
 pub fn check_layout_source(bytes: usize) -> Result<(), Error> {
     if bytes > MAX_LAYOUT_SOURCE_BYTES {
         let mb = |n: usize| n.div_ceil(1024 * 1024);
-        return Err(Error::new(format!(
+        return Err(Error::limit(format!(
             "document is too large to convert: its content needs {} MB of layout source, more than the {} MB limit",
             mb(bytes),
             mb(MAX_LAYOUT_SOURCE_BYTES)
@@ -50,7 +50,7 @@ pub fn read_entry(reader: impl Read) -> Result<Vec<u8>, Error> {
     let mut data = Vec::new();
     reader.take(MAX_ZIP_ENTRY_BYTES + 1).read_to_end(&mut data)?;
     if data.len() as u64 > MAX_ZIP_ENTRY_BYTES {
-        return Err(Error::new(format!("a part of the document is larger than {} MB uncompressed", MAX_ZIP_ENTRY_BYTES / (1024 * 1024))));
+        return Err(Error::limit(format!("a part of the document is larger than {} MB uncompressed", MAX_ZIP_ENTRY_BYTES / (1024 * 1024))));
     }
     Ok(data)
 }
