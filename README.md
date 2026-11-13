@@ -137,7 +137,7 @@ file:
 - An archive part larger than 128 MB uncompressed.
 - XML nested more than 512 elements deep.
 - An XML part with more than 1,000,000 elements.
-- A document whose content needs more than 8 MB of Typst source to lay out, about 1,000
+- A document whose content needs more than 64 MB of Typst source to lay out, about 8,000
   pages of dense text.
 - A spreadsheet that would print more than 30,000 cells.
 
@@ -155,6 +155,19 @@ Clamped:
 - Tables nested more than 12 deep: the inner tables are flattened into paragraphs.
 
 Spreadsheet pages with no content are not printed, as in LibreOffice Calc.
+
+## Long documents
+
+Typst keeps every page in memory until a document is laid out, about 1 MB per page of dense
+text. A document whose content needs more than 2 MB of Typst source, about 270 pages, is
+laid out in chunks of that size instead, each ending where a page starts with a new
+paragraph or table, and the chunks are joined into one PDF. Pages, page numbers, totals,
+headers, footers and footnote numbers come out as in a single pass, and memory stays near
+what one chunk needs: a 5,900-page document peaks at about 510 MB instead of 6 GB.
+
+A chunked PDF is not tagged, since the tags of separate chunks cannot be joined, so it
+carries no structure for screen readers. Presentations with speaker notes are always laid
+out in a single pass.
 
 ## Development
 

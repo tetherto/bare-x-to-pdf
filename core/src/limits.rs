@@ -20,7 +20,7 @@ pub const MAX_SHEET_CELLS: u64 = 30_000;
 pub const MIN_PAGE_SIDE: f64 = 72.0;
 pub const MAX_PAGE_SIDE: f64 = 14_400.0;
 pub const MAX_LENGTH: f64 = 1_000_000.0;
-pub const MAX_LAYOUT_SOURCE_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_LAYOUT_SOURCE_BYTES: usize = 64 * 1024 * 1024;
 
 pub fn check_layout_source(bytes: usize) -> Result<(), Error> {
     if bytes > MAX_LAYOUT_SOURCE_BYTES {

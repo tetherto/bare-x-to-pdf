@@ -9,12 +9,43 @@ const DEFAULT_SIZE: f64 = 11.0;
 const DEFAULT_CELL_MARGIN_X: f64 = 5.4;
 const TEXT_SHIFT: f64 = 0.1;
 
+pub const CUT_LABEL: &str = "sc-cut";
+
 pub struct Emitted {
     pub source: String,
     pub files: Vec<(String, Vec<u8>)>,
+    pub block_sizes: Vec<Vec<usize>>,
+    pub uses_total_pages: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Chunk {
+    pub parts: Vec<(usize, std::ops::Range<usize>)>,
+    pub page_offset: usize,
+    pub page_number: Option<u64>,
+    pub footnotes: usize,
+    pub total_pages: Option<u64>,
+    pub resumed: bool,
+}
+
+pub fn cut_id(section: usize, block: usize) -> i64 {
+    ((section as i64) << 32) | block as i64
+}
+
+pub fn cut_position(id: i64) -> (usize, usize) {
+    ((id >> 32) as usize, (id & 0xffff_ffff) as usize)
 }
 
 pub fn emit(doc: &Document, fonts: &FontSet) -> Emitted {
+    let parts: Vec<(usize, std::ops::Range<usize>)> = doc.sections.iter().enumerate().map(|(i, s)| (i, 0..s.blocks.len())).collect();
+    run(doc, fonts, &parts, None)
+}
+
+pub fn emit_chunk(doc: &Document, fonts: &FontSet, chunk: &Chunk) -> Emitted {
+    run(doc, fonts, &chunk.parts, Some(chunk))
+}
+
+fn run(doc: &Document, fonts: &FontSet, parts: &[(usize, std::ops::Range<usize>)], chunk: Option<&Chunk>) -> Emitted {
     let mut emitter = Emitter {
         doc,
         fonts,
@@ -23,14 +54,23 @@ pub fn emit(doc: &Document, fonts: &FontSet) -> Emitted {
         page: RefCell::new(PageSetup::default()),
         para_line: Cell::new(None),
         table_depth: Cell::new(0),
+        chunk,
+        block_sizes: RefCell::new(Vec::new()),
+        uses_total_pages: Cell::new(false),
+        drop_leading_gap: Cell::new(chunk.is_some_and(|c| c.resumed)),
+        multi_column: false,
     };
     emitter.preamble();
-    for (index, section) in doc.sections.iter().enumerate() {
-        emitter.section(index, section);
+    for (position, (index, range)) in parts.iter().enumerate() {
+        if let Some(section) = doc.sections.get(*index) {
+            emitter.section(*index, section, range, position == 0);
+        }
     }
     Emitted {
         source: emitter.out,
         files: emitter.files.into_inner(),
+        block_sizes: emitter.block_sizes.into_inner(),
+        uses_total_pages: emitter.uses_total_pages.get(),
     }
 }
 
@@ -42,6 +82,11 @@ struct Emitter<'a> {
     page: RefCell<PageSetup>,
     para_line: Cell<Option<f64>>,
     table_depth: Cell<u32>,
+    chunk: Option<&'a Chunk>,
+    block_sizes: RefCell<Vec<Vec<usize>>>,
+    uses_total_pages: Cell<bool>,
+    drop_leading_gap: Cell<bool>,
+    multi_column: bool,
 }
 
 struct CellOut {
@@ -79,18 +124,20 @@ impl Emitter<'_> {
         );
     }
 
-    fn section(&mut self, index: usize, section: &Section) {
+    fn section(&mut self, index: usize, section: &Section, range: &std::ops::Range<usize>, first_in_chunk: bool) {
         *self.page.borrow_mut() = section.page.clone();
         let page = &section.page;
+        let continued = range.start > 0;
 
-        let header = self.margin_slot(section, true, index);
-        let footer = self.margin_slot(section, false, index);
+        let header = self.margin_slot(section, true, index, continued);
+        let footer = self.margin_slot(section, false, index, continued);
         let section_columns = section.columns.min(crate::limits::MAX_TEXT_COLUMNS);
-        let columns = if section_columns > 1 {
+        let columns = if section_columns > 1 || self.multi_column {
             format!(", columns: {section_columns}")
         } else {
             String::new()
         };
+        self.multi_column = section_columns > 1;
         let _ = writeln!(
             self.out,
             "#set page(width: {}, height: {}, margin: (top: {}, bottom: {}, left: {}, right: {}){columns}, header: {header}, footer: {footer}, header-ascent: 0pt, footer-descent: 0pt)",
@@ -104,17 +151,27 @@ impl Emitter<'_> {
         if section_columns > 1 {
             let _ = writeln!(self.out, "#set columns(gutter: {})", pt(section.column_gap));
         }
-        if let Some(start) = section.page_start {
+        if let Some(chunk) = self.chunk.filter(|_| first_in_chunk) {
+            if let Some(number) = chunk.page_number {
+                let _ = writeln!(self.out, "#counter(page).update({number})");
+            }
+            if chunk.footnotes > 0 {
+                let _ = writeln!(self.out, "#counter(footnote).update({})", chunk.footnotes);
+            }
+        }
+        if let Some(start) = section.page_start.filter(|_| !continued) {
             let _ = writeln!(self.out, "#counter(page).update({})", start.clamp(0, i64::from(u32::MAX)));
         }
         let _ = writeln!(self.out, "#metadata(none) <section-{index}>");
-        for anchor in &section.anchors {
-            let mut placed = String::new();
-            self.anchor(anchor, &mut placed);
-            self.out.push_str(&placed);
+        if !continued {
+            for anchor in &section.anchors {
+                let mut placed = String::new();
+                self.anchor(anchor, &mut placed);
+                self.out.push_str(&placed);
+            }
         }
 
-        let blocks = self.blocks(&section.blocks, false);
+        let blocks = self.blocks_in(&section.blocks, false, Some((index, range)));
         if section.content_scale > 0.0 && (section.content_scale - 1.0).abs() > 0.001 {
             let percent = trim_num(section.content_scale * 100.0);
             let _ = writeln!(self.out, "#scale(x: {percent}%, y: {percent}%, reflow: true)[{blocks}]");
@@ -123,14 +180,14 @@ impl Emitter<'_> {
         }
     }
 
-    fn margin_slot(&self, section: &Section, header: bool, index: usize) -> String {
+    fn margin_slot(&self, section: &Section, header: bool, index: usize, continued: bool) -> String {
         let (default, first, even) = if header {
             (&section.header_default, &section.header_first, &section.header_even)
         } else {
             (&section.footer_default, &section.footer_first, &section.footer_even)
         };
         let empty: Vec<Block> = Vec::new();
-        let first = if section.title_page { Some(first.as_ref().unwrap_or(&empty)) } else { None };
+        let first = if section.title_page && !continued { Some(first.as_ref().unwrap_or(&empty)) } else { None };
         let even = if self.doc.even_odd_headers { Some(even.as_ref().unwrap_or(&empty)) } else { None };
         if default.is_none() && first.is_none() && even.is_none() {
             return "none".to_string();
@@ -159,7 +216,11 @@ impl Emitter<'_> {
         let even_expr = even.map(|e| render(Some(e)));
 
         let mut body = String::new();
-        let _ = write!(body, "context {{ let n = here().page(); let first = locate(<section-{index}>).page(); ");
+        let offset = match self.chunk.map_or(0, |c| c.page_offset) {
+            0 => String::new(),
+            pages => format!(" + {pages}"),
+        };
+        let _ = write!(body, "context {{ let n = here().page(){offset}; let first = locate(<section-{index}>).page(){offset}; ");
         if let Some(first_expr) = first_expr {
             let _ = write!(body, "if n == first {{ {first_expr} }} else ");
         }
@@ -171,6 +232,13 @@ impl Emitter<'_> {
     }
 
     fn blocks(&self, blocks: &[Block], trailing: bool) -> String {
+        self.blocks_in(blocks, trailing, None)
+    }
+
+    fn blocks_in(&self, blocks: &[Block], trailing: bool, top: Option<(usize, &std::ops::Range<usize>)>) -> String {
+        if top.is_some() && self.chunk.is_none() {
+            self.block_sizes.borrow_mut().push(Vec::with_capacity(blocks.len()));
+        }
         let mut out = String::new();
         let mut prev_after = 0.0;
         let mut prev_style: Option<&str> = None;
@@ -200,46 +268,72 @@ impl Emitter<'_> {
             .collect();
 
         for (index, block) in blocks.iter().enumerate() {
+            let emit = top.is_none_or(|(_, range)| range.contains(&index));
+            let leading = emit && top.is_some() && self.drop_leading_gap.replace(false);
+            let start = out.len();
+            let first_in_group = match block {
+                Block::Paragraph(_) => keys[index].is_none() || index == 0 || keys[index - 1] != keys[index],
+                _ => true,
+            };
+            let breaks_first = match block {
+                Block::Paragraph(p) => p.props.page_break_before == Some(true) || matches!(p.inlines.first(), Some(Inline::PageBreak)),
+                _ => false,
+            };
+            if let (Some((section, _)), Some(_), true, true, false) = (top, self.chunk, emit, first_in_group, breaks_first) {
+                let _ = writeln!(out, "#metadata({}) <{CUT_LABEL}>", cut_id(section, index));
+            }
             match block {
                 Block::Paragraph(p) => {
                     let key = &keys[index];
-                    let first_in_group = key.is_none() || index == 0 || keys[index - 1] != *key;
                     let last_in_group = key.is_none() || index + 1 == keys.len() || keys[index + 1] != *key;
                     let before = p.props.space_before.unwrap_or(0.0);
                     let same_style = prev_paragraph && p.props.style_id.as_deref() == prev_style;
                     let contextual = p.props.contextual_spacing.unwrap_or(false);
                     let lower = if same_style && prev_contextual { 0.0 } else { prev_after };
                     let upper = if same_style && contextual { 0.0 } else { before };
-                    let gap = if self.doc.additive_spacing {
+                    let gap = if leading {
+                        0.0
+                    } else if self.doc.additive_spacing {
                         lower + upper
                     } else {
                         lower.max(upper)
                     };
-                    self.paragraph(p, gap, first_in_group, last_in_group, &mut out);
+                    if emit {
+                        self.paragraph(p, gap, first_in_group, last_in_group, &mut out);
+                    }
                     prev_after = p.props.space_after.unwrap_or(0.0);
                     prev_style = p.props.style_id.as_deref();
                     prev_paragraph = true;
                     prev_contextual = contextual;
                 }
                 Block::Table(t) => {
-                    if prev_after > 0.01 {
-                        let _ = writeln!(out, "#v({})", pt(prev_after));
+                    if emit {
+                        if prev_after > 0.01 && !leading {
+                            let _ = writeln!(out, "#v({})", pt(prev_after));
+                        }
+                        self.table(t, &mut out);
                     }
-                    self.table(t, &mut out);
                     prev_after = 0.0;
                     prev_style = None;
                     prev_paragraph = false;
                     prev_contextual = false;
                 }
                 Block::Columns(c) => {
-                    if prev_after > 0.01 {
-                        let _ = writeln!(out, "#v({})", pt(prev_after));
+                    if emit {
+                        if prev_after > 0.01 && !leading {
+                            let _ = writeln!(out, "#v({})", pt(prev_after));
+                        }
+                        self.columns_block(c, &mut out);
                     }
-                    self.columns_block(c, &mut out);
                     prev_after = 0.0;
                     prev_style = None;
                     prev_paragraph = false;
                     prev_contextual = false;
+                }
+            }
+            if top.is_some() && self.chunk.is_none() {
+                if let Some(sizes) = self.block_sizes.borrow_mut().last_mut() {
+                    sizes.push(out.len() - start);
                 }
             }
         }
@@ -431,7 +525,13 @@ impl Emitter<'_> {
                     any_text = true;
                     let value = match kind {
                         FieldKind::Page => format!("context counter(page).display({})", typst_str(self.page_pattern())),
-                        FieldKind::NumPages => "context counter(page).final().first()".to_string(),
+                        FieldKind::NumPages => {
+                            self.uses_total_pages.set(true);
+                            match self.chunk.and_then(|c| c.total_pages) {
+                                Some(total) => typst_str(&total.to_string()),
+                                None => "context counter(page).final().first()".to_string(),
+                            }
+                        }
                     };
                     items.push(self.text_expr_content(&value, props, spacing).to_string());
                     x = None;

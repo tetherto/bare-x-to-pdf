@@ -61,6 +61,18 @@ test('lists supported conversions', (t) => {
   )
 })
 
+test('lays out a long document in chunks and joins them into one pdf', async (t) => {
+  const pdf = inspect(await converter.convert(fixture('long-text.docx'), { to: 'pdf' }))
+  t.is(pdf.header, '%PDF-')
+  t.is(pdf.pageCount, 650)
+  t.ok(pdf.hasFont)
+})
+
+test('a section after a two-column section goes back to one column', async (t) => {
+  const pdf = inspect(await converter.convert(fixture('chunked-no-cut.docx'), { to: 'pdf' }))
+  t.is(pdf.pageCount, 36)
+})
+
 test('converts a minimal docx with a table and unicode text to pdf', async (t) => {
   const pdf = inspect(await converter.convert(fixture('minimal-table-unicode.docx'), { to: 'pdf' }))
   t.is(pdf.header, '%PDF-')
