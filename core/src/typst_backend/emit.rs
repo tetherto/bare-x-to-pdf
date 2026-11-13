@@ -1010,9 +1010,10 @@ impl Emitter<'_> {
     }
 
     fn register(&self, image: &ImageData) -> String {
+        let (format, data) = super::images::sanitize(image.format, &image.data);
         let mut files = self.files.borrow_mut();
-        let path = format!("media/img{}.{}", files.len() + 1, image.format.extension());
-        files.push((path.clone(), image.data.clone()));
+        let path = format!("media/img{}.{}", files.len() + 1, format.extension());
+        files.push((path.clone(), data));
         format!("/{path}")
     }
 

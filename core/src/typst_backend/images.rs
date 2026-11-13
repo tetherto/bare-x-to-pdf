@@ -1,4 +1,5 @@
 use crate::limits::MAX_IMAGE_PIXELS;
+use crate::model::ImageFormat;
 use typst::foundations::Bytes;
 use typst::visualize::{ExchangeFormat, RasterImage};
 
@@ -8,22 +9,26 @@ const PLACEHOLDER: [u8; 68] = [
     0x02, 0x00, 0x00, 0x05, 0x00, 0x01, 0x7a, 0x5e, 0xab, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
 ];
 
-pub fn sanitize(path: &str, data: Vec<u8>) -> Vec<u8> {
-    let format = match path.rsplit('.').next() {
-        Some("png") => ExchangeFormat::Png,
-        Some("jpg") => ExchangeFormat::Jpg,
-        Some("gif") => ExchangeFormat::Gif,
-        _ => return data,
+pub fn sanitize(format: ImageFormat, data: &[u8]) -> (ImageFormat, Vec<u8>) {
+    let exchange = match format {
+        ImageFormat::Png => ExchangeFormat::Png,
+        ImageFormat::Jpeg => ExchangeFormat::Jpg,
+        ImageFormat::Gif => ExchangeFormat::Gif,
+        ImageFormat::Svg => return (format, data.to_vec()),
     };
-    let within_limit = dimensions(format, &data).is_some_and(|(w, h)| w > 0 && h > 0 && u64::from(w) * u64::from(h) <= MAX_IMAGE_PIXELS);
+    let within_limit = dimensions(exchange, data).is_some_and(|(w, h)| w > 0 && h > 0 && u64::from(w) * u64::from(h) <= MAX_IMAGE_PIXELS);
     if !within_limit {
-        return PLACEHOLDER.to_vec();
+        return placeholder();
     }
-    let bytes = Bytes::new(data);
-    match RasterImage::plain(bytes.clone(), format) {
-        Ok(_) => bytes.to_vec(),
-        Err(_) => PLACEHOLDER.to_vec(),
+    let bytes = Bytes::new(data.to_vec());
+    match RasterImage::plain(bytes.clone(), exchange) {
+        Ok(_) => (format, bytes.to_vec()),
+        Err(_) => placeholder(),
     }
+}
+
+fn placeholder() -> (ImageFormat, Vec<u8>) {
+    (ImageFormat::Png, PLACEHOLDER.to_vec())
 }
 
 fn dimensions(format: ExchangeFormat, data: &[u8]) -> Option<(u32, u32)> {
